@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use image::RgbaImage;
 
 use crate::adapter::{
-    CaptureBackend, CaptureTrait, InputBackend, InputTrait, Match, VisionBackend, VisionTrait,
+    CaptureBackend, CaptureTrait, InputBackend, InputTrait, Key, Match, VisionBackend, VisionTrait,
 };
 
 /// 组合动作执行器
@@ -25,6 +25,31 @@ impl Actions {
             input: InputBackend,
             vision: VisionBackend,
         }
+    }
+
+    /// 全屏截图
+    pub fn capture_full(&self) -> Result<RgbaImage> {
+        self.capture.capture_full()
+    }
+
+    /// 移动鼠标到屏幕绝对坐标
+    pub fn move_mouse(&self, x: i32, y: i32) -> Result<()> {
+        self.input.move_mouse(x, y)
+    }
+
+    /// 左键单击（当前鼠标位置）
+    pub fn click(&self) -> Result<()> {
+        self.input.click()
+    }
+
+    /// 按下指定按键
+    pub fn key_press(&self, key: Key) -> Result<()> {
+        self.input.key_press(key)
+    }
+
+    /// 输入一段文本
+    pub fn type_text(&self, text: &str) -> Result<()> {
+        self.input.type_text(text)
     }
 
     /// 在屏幕上查找模板图像

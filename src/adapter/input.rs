@@ -7,6 +7,7 @@ use enigo::{Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 pub struct InputBackend;
 
 /// 键盘键位（M0 先覆盖常用键，后续按需扩充）
+#[derive(Debug, Clone, Copy)]
 pub enum Key {
     Enter,
     Escape,

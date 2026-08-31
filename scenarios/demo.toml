@@ -1,0 +1,30 @@
+# M2 冒烟演示场景：验证「TOML 解析 → 流程引擎 → 报告」全链路
+# 用法: cargo run -- run scenarios/demo.toml
+
+[meta]
+name = "M2 冒烟演示"
+
+[[step]]
+action = "screenshot"
+
+[[step]]
+action = "wait"
+seconds = 0.5
+
+[[step]]
+action = "move_mouse"
+x = 320
+y = 240
+
+[[step]]
+action = "click"
+x = 320
+y = 240
+
+[[step]]
+action = "key_press"
+key = "space"
+
+[[step]]
+action = "type_text"
+text = "demo"
