@@ -1,0 +1,18 @@
+[package]
+name = "auto-game"
+version = "0.1.0"
+edition = "2021"
+description = "电脑游戏自动化测试项目"
+
+[dependencies]
+# 错误处理
+anyhow = "1"
+# 屏幕截图采集
+screenshots = "0.8"
+# 图像处理（模板匹配、像素比对）
+image = "0.25"
+# 键盘 / 鼠标模拟输入
+enigo = "0.2"
+# 配置序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
