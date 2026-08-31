@@ -1,6 +1,10 @@
 # Rust 构建产物
 /target
 
+# 本地验证产物（截图/报告）
+screenshot_*.png
+/reports/
+
 # 编辑器
 .idea/
 .vscode/
