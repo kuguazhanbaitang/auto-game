@@ -2,17 +2,22 @@
 name = "auto-game"
 version = "0.1.0"
 edition = "2021"
-description = "电脑游戏自动化测试项目"
+description = "通用电脑游戏自动化测试框架"
 
 [dependencies]
-# 错误处理
-anyhow = "1"
-# 屏幕截图采集
-screenshots = "0.8"
-# 图像处理（模板匹配、像素比对）
-image = "0.25"
-# 键盘 / 鼠标模拟输入
+# 核心自动化库：截图 + 模板匹配找图 + 键鼠模拟（PyAutoGUI 的 Rust 版）
+rustautogui = "2.5"
+# 跨平台截图增强：多显示器、指定窗口捕获
+xcap = "0.2"
+# 跨平台键鼠模拟（trait 抽象，便于替换后端）
 enigo = "0.2"
+# 图像处理（截图缓冲、模板）
+image = "0.25"
 # 配置序列化
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+toml = "0.8"
+# 错误处理
+anyhow = "1"
+# 结构化日志
+tracing = "0.1"
+tracing-subscriber = "0.3"
