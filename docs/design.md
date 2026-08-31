@@ -132,8 +132,42 @@ image = "assets/main_menu.png"
 timeout = 20
 ```
 
-动作原语一览（MVP 范围）：
-`wait_image` / `find_image` / `click_image` / `click`(坐标) / `move_mouse` / `key_press` / `key_combo` / `type_text` / `assert_image` / `wait`(固定延时) / `screenshot`(存档证据)
+动作原语一览（M3 已实现）：
+`wait_image` / `find_image` / `click_image` / `click`(坐标) / `move_mouse` / `key_press` / `type_text` / `assert_image` / `wait`(固定延时) / `screenshot`(存档证据) / `repeat`+`end_repeat`(循环) / `if_image`+`else`+`end_if`(条件分支)
+
+控制流语法（TOML 扁平步骤 + 显式结束标记）：
+```toml
+[[step]]                          # 循环 3 次
+action = "repeat"
+count = 3
+
+[[step]]
+action = "click_image"
+image = "attack_btn.png"
+
+[[step]]                          # 条件：弹窗出现则关闭
+action = "if_image"
+image = "close_btn.png"
+precision = 0.8
+
+[[step]]
+action = "click_image"
+image = "close_btn.png"
+
+[[step]]
+action = "else"
+
+[[step]]
+action = "wait"
+seconds = 1
+
+[[step]]
+action = "end_if"
+
+[[step]]
+action = "end_repeat"
+```
+控制结构由引擎编译成带跳转的指令序列（`repeat`/`end_repeat`、`if_image`/`else`/`end_if` 必须配对，未闭合在编译期报错）。
 
 ---
 
@@ -155,7 +189,7 @@ timeout = 20
 | **M0 骨架** | 接入 xcap + enigo + rustautogui，实现截图保存 PNG、模拟一次键鼠 | 本机跑通采集与输入链路 |
 | **M1 原语** | Vision trait 落地模板匹配，实现 click_image / wait_image / assert_image | 可对一个游戏完成「找图→点击→验证」手写调用 |
 | **M2 引擎** | TOML 脚本解析 + 流程引擎 + 报告 | 纯配置文件能跑通一个冒烟场景 |
-| **M3 增强** | 条件分支/循环、OCR 接入、HTML 报告、可选 GUI 录制器 | 覆盖多场景，报告可读 |
+| **M3 增强** | ✅ 条件分支/循环、✅ HTML 报告；OCR 接入 / GUI 录制器预留 | 覆盖多场景，报告可读（HTML 已可读） |
 
 ---
 

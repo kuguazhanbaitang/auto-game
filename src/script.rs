@@ -51,6 +51,9 @@ pub struct Step {
     /// 固定延时（秒）
     #[serde(default)]
     pub seconds: Option<f64>,
+    /// 循环次数（仅 repeat 动作使用）
+    #[serde(default)]
+    pub count: Option<u32>,
 }
 
 impl Scenario {

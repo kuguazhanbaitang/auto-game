@@ -1,4 +1,8 @@
-//! 流程引擎：按顺序执行场景中的动作，收集并输出报告
+//! 流程引擎：把步骤编译成指令序列，支持循环/条件分支，按序执行并输出报告
+//!
+//! 控制流语法（TOML 扁平步骤）：
+//! - `repeat`（需 `count`）... `end_repeat`：循环
+//! - `if_image`（需 `image`）... [`else`] ... `end_if`：条件分支
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -10,6 +14,35 @@ use crate::action::Actions;
 use crate::adapter::Key;
 use crate::report::{Report, Status};
 use crate::script::{Scenario, Step};
+
+/// 编译后的指令
+struct Instr {
+    step: Step,
+    kind: Kind,
+}
+
+/// 指令类型（跳转字段在编译期填充）
+enum Kind {
+    /// 普通动作
+    Action,
+    /// 循环开始；end = 对应 end_repeat 的索引
+    Repeat { end: usize },
+    /// 循环结束；back = 对应 repeat 的索引
+    EndRepeat { back: usize },
+    /// 条件判断；命中顺序执行 then，未命中跳到 else_or_end
+    IfImage { else_or_end: usize, end: usize },
+    /// else 分支；then 已执行则跳到 end
+    Else { end: usize },
+    /// 条件结束
+    EndIf,
+}
+
+/// 运行时控制流帧
+enum Frame {
+    Repeat { count: u32, done: u32 },
+    InThen,
+    InElse,
+}
 
 /// 流程引擎
 pub struct Engine {
@@ -33,25 +66,118 @@ impl Engine {
         }
     }
 
-    /// 运行整个场景，返回是否全部通过
+    /// 运行整个场景，返回是否全部通过（自动打印文本报告 + 写出 HTML 报告）
     pub fn run(&mut self, scenario: &Scenario) -> Result<bool> {
-        for (idx, step) in scenario.steps.iter().enumerate() {
-            let start = Instant::now();
-            let result = self.execute(step, idx + 1);
-            let duration = start.elapsed();
-            match result {
-                Ok(detail) => {
-                    self.report
-                        .record(idx + 1, &step.action, detail, Status::Pass, duration);
+        let instrs = compile(&scenario.steps)?;
+        let mut frames: Vec<Frame> = Vec::new();
+        let mut pc = 0usize;
+        let mut exec_no = 0usize;
+
+        while pc < instrs.len() {
+            let instr = &instrs[pc];
+            match &instr.kind {
+                Kind::Action => {
+                    exec_no += 1;
+                    let start = Instant::now();
+                    let result = self.execute(&instr.step, exec_no);
+                    let duration = start.elapsed();
+                    match result {
+                        Ok(detail) => self.report.record(
+                            exec_no, &instr.step.action, detail, Status::Pass, duration,
+                        ),
+                        Err(e) => self.report.record(
+                            exec_no,
+                            &instr.step.action,
+                            format!("{e:#}"),
+                            Status::Fail,
+                            duration,
+                        ),
+                    }
+                    pc += 1;
                 }
-                Err(e) => {
-                    self.report
-                        .record(idx + 1, &step.action, format!("{e:#}"), Status::Fail, duration);
+                Kind::Repeat { .. } => {
+                    let count = instr.step.count.unwrap_or(1);
+                    frames.push(Frame::Repeat { count, done: 0 });
+                    pc += 1;
+                }
+                Kind::EndRepeat { back } => {
+                    match frames.last_mut() {
+                        Some(Frame::Repeat { count, done }) if *done + 1 < *count => {
+                            *done += 1;
+                            pc = back + 1;
+                        }
+                        _ => {
+                            frames.pop();
+                            pc += 1;
+                        }
+                    }
+                }
+                Kind::IfImage { else_or_end, .. } => {
+                    exec_no += 1;
+                    let start = Instant::now();
+                    let found = self.if_image_hit(&instr.step);
+                    let duration = start.elapsed();
+                    match found {
+                        Ok(hit) => {
+                            let detail = if hit {
+                                "条件命中：找到模板，执行 then 分支".to_string()
+                            } else {
+                                "条件未命中：未找到模板，走 else/跳过".to_string()
+                            };
+                            self.report.record(
+                                exec_no, &instr.step.action, detail, Status::Pass, duration,
+                            );
+                            if hit {
+                                frames.push(Frame::InThen);
+                                pc += 1;
+                            } else {
+                                frames.push(Frame::InElse);
+                                pc = *else_or_end;
+                            }
+                        }
+                        Err(e) => {
+                            self.report.record(
+                                exec_no,
+                                &instr.step.action,
+                                format!("{e:#}"),
+                                Status::Fail,
+                                duration,
+                            );
+                            frames.push(Frame::InElse);
+                            pc = *else_or_end;
+                        }
+                    }
+                }
+                Kind::Else { end } => match frames.pop() {
+                    Some(Frame::InThen) => {
+                        frames.push(Frame::InElse);
+                        pc = *end;
+                    }
+                    _ => {
+                        frames.push(Frame::InElse);
+                        pc += 1;
+                    }
+                },
+                Kind::EndIf => {
+                    frames.pop();
+                    pc += 1;
                 }
             }
         }
+
         self.report.print();
+        self.report.write_html(&self.reports_dir.join("index.html"))?;
         Ok(self.report.all_passed())
+    }
+
+    /// 条件判断：模板是否出现（模板加载/匹配出错时返回 Err）
+    fn if_image_hit(&self, step: &Step) -> Result<bool> {
+        let template = self.load_template(step)?;
+        let precision = req_precision(step);
+        match self.actions.find_image(&template, precision)? {
+            Some(_) => Ok(true),
+            None => Ok(false),
+        }
     }
 
     /// 分发到具体动作实现
@@ -177,6 +303,77 @@ impl Engine {
         }
         Ok(p)
     }
+}
+
+/// 把扁平步骤编译成指令序列（配对控制结构、填充跳转）
+fn compile(steps: &[Step]) -> Result<Vec<Instr>> {
+    enum Ctl {
+        Repeat(usize),
+        If(usize),
+    }
+    let mut instrs: Vec<Instr> = Vec::new();
+    let mut stack: Vec<Ctl> = Vec::new();
+
+    for step in steps {
+        match step.action.as_str() {
+            "repeat" => {
+                let idx = instrs.len();
+                instrs.push(Instr { step: step.clone(), kind: Kind::Repeat { end: usize::MAX } });
+                stack.push(Ctl::Repeat(idx));
+            }
+            "end_repeat" => {
+                let repeat_idx = match stack.pop() {
+                    Some(Ctl::Repeat(i)) => i,
+                    _ => bail!("end_repeat 无匹配的 repeat"),
+                };
+                let end_idx = instrs.len();
+                if let Kind::Repeat { end } = &mut instrs[repeat_idx].kind {
+                    *end = end_idx;
+                }
+                instrs.push(Instr { step: step.clone(), kind: Kind::EndRepeat { back: repeat_idx } });
+            }
+            "if_image" => {
+                let idx = instrs.len();
+                instrs.push(Instr {
+                    step: step.clone(),
+                    kind: Kind::IfImage { else_or_end: usize::MAX, end: usize::MAX },
+                });
+                stack.push(Ctl::If(idx));
+            }
+            "else" => {
+                let if_idx = match stack.last() {
+                    Some(Ctl::If(i)) => *i,
+                    _ => bail!("else 无匹配的 if_image"),
+                };
+                let else_idx = instrs.len();
+                if let Kind::IfImage { else_or_end, .. } = &mut instrs[if_idx].kind {
+                    *else_or_end = else_idx;
+                }
+                instrs.push(Instr { step: step.clone(), kind: Kind::Else { end: usize::MAX } });
+            }
+            "end_if" => {
+                let if_idx = match stack.pop() {
+                    Some(Ctl::If(i)) => i,
+                    _ => bail!("end_if 无匹配的 if_image"),
+                };
+                let end_idx = instrs.len();
+                if let Kind::IfImage { else_or_end, end } = &mut instrs[if_idx].kind {
+                    if *else_or_end == usize::MAX {
+                        *else_or_end = end_idx;
+                    }
+                    *end = end_idx;
+                }
+                instrs.push(Instr { step: step.clone(), kind: Kind::EndIf });
+            }
+            _ => {
+                instrs.push(Instr { step: step.clone(), kind: Kind::Action });
+            }
+        }
+    }
+    if !stack.is_empty() {
+        bail!("存在未闭合的控制结构（缺少 end_repeat / end_if）");
+    }
+    Ok(instrs)
 }
 
 fn req_xy(step: &Step) -> Result<(i32, i32)> {

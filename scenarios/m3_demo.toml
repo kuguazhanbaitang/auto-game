@@ -1,0 +1,39 @@
+# M3 控制流演示场景：验证「循环 + 条件分支」的执行与报告
+# 用法: cargo run -- run scenarios/m3_demo.toml
+#
+# 结构说明：
+# - repeat 3 次：每次截图存档
+# - if_image 判断（模板不存在 → 未命中 → 走 else 分支 wait）
+#   then 分支的 key_press 应被跳过，不会出现在报告中
+
+[meta]
+name = "M3 控制流演示"
+
+[[step]]
+action = "repeat"
+count = 3
+
+[[step]]
+action = "screenshot"
+
+[[step]]
+action = "if_image"
+image = "nonexistent.png"
+precision = 0.8
+
+[[step]]
+action = "key_press"
+key = "enter"
+
+[[step]]
+action = "else"
+
+[[step]]
+action = "wait"
+seconds = 0.2
+
+[[step]]
+action = "end_if"
+
+[[step]]
+action = "end_repeat"
