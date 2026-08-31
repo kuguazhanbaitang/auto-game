@@ -13,6 +13,8 @@ xcap = "0.2"
 enigo = "0.2"
 # 图像处理（截图缓冲、模板）
 image = "0.25"
+# 模板匹配（纯 Rust 实现）
+imageproc = "0.25"
 # 配置序列化
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
