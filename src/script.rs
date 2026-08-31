@@ -26,7 +26,8 @@ pub struct Meta {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Step {
     /// 动作类型：screenshot / wait / move_mouse / click / key_press /
-    /// type_text / find_image / wait_image / click_image / assert_image
+    /// type_text / find_image / wait_image / click_image / assert_image /
+    /// repeat / end_repeat / if_image / else / end_if
     pub action: String,
     /// 模板图像路径（相对 assets 目录）
     #[serde(default)]
@@ -51,6 +52,9 @@ pub struct Step {
     /// 固定延时（秒）
     #[serde(default)]
     pub seconds: Option<f64>,
+    /// 循环次数（仅 repeat 动作使用）
+    #[serde(default)]
+    pub count: Option<u32>,
 }
 
 impl Scenario {
