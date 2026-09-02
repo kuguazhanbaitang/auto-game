@@ -406,3 +406,42 @@ auto-game validate <场景.toml> [--assets <资源目录>]
 - **按引擎真实语义检查**：每一项 ERROR 都对应运行期必然失败（而非表面语法），WARN 对应「有回退默认值但建议修正」。
 
 
+- **复用而非重写**：控制流配对检查直接调 `engine::check_control_flow`（内部走 `compile`），与运行期判定完全一致，将来新增控制结构只改一处；
+- **纯静态、零副作用**：不实例化 Engine、不碰屏幕/输入/模型加载，可在 CI / 预提交钩子中安全使用；
+- **按引擎真实语义检查**：每一项 ERROR 都对应运行期必然失败（而非表面语法），WARN 对应「有回退默认值但建议修正」。
+
+## 13. CI 与打包（GitHub Actions）
+
+> 里程碑：M4 后续⑤。云端自动构建 + 测试 + Release exe 打包，绕开本机 GitHub HTTPS 443 不可达（推送一直走 MCP 工具通道），GitHub Actions 云端 runner 有完整网络。
+
+### 13.1 流水线（`.github/workflows/ci.yml`）
+
+```
+push / PR → main
+   │
+   ├─ job: test（windows-latest）
+   │    build --all-targets → cargo test（50 tests）→ validate 冒烟
+   │
+   └─ job: package（仅 push main，needs: test）
+        cargo build --release → 组装 bundle → 上传 Artifact
+```
+
+- 平台单一 **windows-latest**：项目纯 Windows 定位（xcap/enigo/device_query/eframe-glow），Linux 需额外 X11/GL 系统库；
+- `CARGO_TARGET_DIR: target` 覆盖本地 `.cargo/config.toml` 的 `D:/auto-game-target`（CI runner 无该路径语义）；
+- 缓存 `Swatinem/rust-cache` 减少云端重复编译（OCR/eframe 依赖树大）。
+
+### 13.2 打包产物（自包含 bundle）
+
+| 内容 | 用途 |
+|---|---|
+| `auto-game.exe` | release 可执行文件 |
+| `libs/onnxruntime.dll` + `_providers_shared.dll` | OCR 运行时（避免用户安装 ONNX Runtime） |
+| `assets/`（含 `ocr/` 模型） | 模板 + OCR 模型，随包自带 |
+| `scenarios/` | 示例场景 |
+| `README.md` | 使用说明 |
+
+解压即用：OCR 运行时设 `ORT_DYLIB_PATH` 指向包内 dll 即可，无需再联网下载。
+
+### 13.3 边界
+
+- GitHub Actions 真实执行需推送后在云端验证（本机无法运行 Actions）；首次云端运行若 ort 2.0.0-rc 下载预编译 onnxruntime 失败，可调整 vendor 依赖的 features（禁用 download-binaries 改用 vendored/动态加载）。

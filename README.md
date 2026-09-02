@@ -22,6 +22,7 @@
 - **组合键**：`key_combo` 支持 Ctrl+A 等组合键；按键覆盖游戏常用键位（WASD/数字/F1-F12/方向/修饰键）
 - **GUI 录制器**：`gui` 子命令打开桌面界面——实时画面预览、录制手动点击/按键自动生成步骤、框选即存模板、步骤可视化编辑、一键导出 TOML 并复用引擎运行（录制自动生成 `click`/`key_press`，坐标点击可一键转 `click_image` 模板）
 - **场景静态校验**：`validate` 子命令运行前体检——检查 TOML 语法/动作合法性/必填参数/模板存在/控制流闭合/OCR 模型存在，发现错误退出码 1，适合接入 CI 或预提交钩子
+- **CI + 打包**：GitHub Actions 云端自动构建 + 全量测试 + Release exe 自包含打包（exe + OCR 运行时 + 模型，解压即用），绕开本机 GitHub 443 不可达
 - **报告**：文本报告 + HTML 报告（状态着色、耗时统计、注入转义）
 - **可插拔后端**：截图 / 输入 / 识别 / OCR 全部封装在 trait 之后，可替换底层库（xcap / enigo / rustautogui / paddleocr_rs_onnx）
 
@@ -571,7 +572,23 @@ region = { x = 1600, y = 900, w = 300, h = 150 }
 
 ---
 
+## 🚀 GitHub Actions CI + 打包
+
+云端自动构建 + 测试 + Release exe 打包。由于本机 GitHub HTTPS 443 常不可达，把构建与测试放到 GitHub Actions 云端 runner（有完整网络）执行。
+
+- **触发**：push / PR 到 `main`
+- **test job**（每次 push/PR）：`cargo build --all-targets` + `cargo test`（50 个测试）+ `validate scenarios/demo.toml` 冒烟
+- **package job**（仅 push `main`）：`cargo build --release` 后组装**自包含 bundle**——`auto-game.exe` + `libs/onnxruntime.dll` + OCR 模型 `assets/` + 示例场景 `scenarios/` + `README.md`，上传为 Actions Artifact，解压即用（OCR 无需再下载运行时）
+- **获取产物**：GitHub 仓库 → Actions → 最新一次 main 运行 → 底部 Artifacts → 下载 `auto-game-windows`
+
+工作流文件：`.github/workflows/ci.yml`。
+
+> 说明：工作流用 `CARGO_TARGET_DIR: target` 覆盖仓库内 `.cargo/config.toml` 的本地 `D:/auto-game-target` 路径（该路径是用户本机 C 盘告急时迁移产物所用，CI runner 无此盘符语义）。
+
+---
+
 ## 🧪 测试
+
 
 ```bash
 cargo test          # 运行单元测试（脚本解析 / 控制流编译 / 报告 / 按键映射）

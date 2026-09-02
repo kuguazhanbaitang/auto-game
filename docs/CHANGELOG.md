@@ -328,6 +328,31 @@
 - `cargo test -j 1` = **50 passed + 3 ignored**（新增 11 个 validate 测试：合法场景通过、未知动作/缺参数/模板缺失/控制流未闭合/悬空 else/非法按键/OCR 缺模型/precision 越界/坏 TOML 报错、空场景仅警告）。
 - 实测 `validate scenarios/demo.toml` → ✅ 通过；构造坏场景 → 精确报出 7 个错误（控制流、缺 x/y、未知动作、非法按键、模板缺失、precision 越界）且退出码 1。
 
+### M4 后续⑤：GitHub Actions CI + 打包（2026-09-02，本地未推送）
+
+#### 需求与定位
+
+三个候选功能的最后一项：**云端自动构建 + 测试 + Release exe 打包**。它恰好绕开贯穿全程的本机痛点——**GitHub HTTPS 443 不可达**（推送一直走 MCP 工具通道），而 GitHub Actions 云端 runner 有完整网络（crates.io / GitHub releases 均可访问）。
+
+#### 设计决策
+
+| 决策 | 内容 | 原因 |
+|---|---|---|
+| 平台 | **windows-latest** 单一平台 | 项目纯 Windows 定位（xcap/enigo/device_query/eframe-glow 均为 Windows 目标）；Linux 需额外装 X11/GL 系统库，收益低 |
+| 触发 | push / PR 到 main | 常规 CI 语义 |
+| 两个 job | `test`（build --all-targets + test + validate 冒烟）→ `package`（release exe + 打包，**仅 push main**，`needs: test`） | 测试与发布分离；PR 只测不打包 |
+| **target-dir 覆盖** | 顶层 `env: CARGO_TARGET_DIR: target` | **关键坑**：仓库根 `.cargo/config.toml` 指向本地 `D:/auto-game-target`（用户 C 盘告急时迁移的），CI runner 无此路径语义 → 必须覆盖；`cargo metadata` 实测 env 生效后 target_directory 由 `D:/auto-game-target` 变为 `.../target` |
+| 缓存 | `Swatinem/rust-cache@v2` | 减少云端重复编译（OCR/eframe 依赖树大） |
+| 自包含 bundle | exe + `libs/onnxruntime.dll` + `onnxruntime_providers_shared.dll` + `assets/`（含 OCR 模型）+ `scenarios/` + `README.md` | 解压即用，OCR 运行时无需再下载 |
+| 上游 vendor 的 `.github/workflows/` | 位于 `vendor/paddleocr_rs_onnx/.github/`，GitHub 只识别仓库根 workflow，不会误触发 | 无需处理 |
+
+#### 验证
+
+- `pyyaml` 解析 workflow → YAML 结构合法（jobs: test/package、env 正确）；
+- `cargo metadata` 实测 `CARGO_TARGET_DIR` 覆盖语义成立（`D:/auto-game-target` → `target`）；
+- CI 打包脚本在本地模拟执行成功：bundle 结构正确（exe + dll + 模型 + 场景 + README），debug 体积 ~106MB（release 更小，大头是 onnxruntime dll ~15MB + OCR 模型 ~15MB）；
+- **说明**：GitHub Actions 真实执行需推送后由云端跑（本机无法运行 Actions），首次云端运行结果需推送后确认；若 ort 2.0.0-rc 在云端下载预编译 onnxruntime 失败，可再调整（如禁用 download-binaries）。
+
 ---
 
 ## 四、关键技术机制复盘（深入原理）
@@ -483,7 +508,7 @@
 3. ~~OCR 接入~~ ✅ 已做（paddleocr_rs_onnx + PP-OCRv4）
 4. ~~GUI 录制器（egui）~~ ✅ 已做（M4 后续③）——可视化编排场景、录制点击序列、画面预览、步骤编辑、导出并复用引擎运行。
 5. ~~场景静态校验（validate 子命令）~~ ✅ 已做（M4 后续④）——不实际跑场景就能检查 TOML 语法 / 模板存在 / 控制流闭合 / OCR 模型存在。
-6. **GitHub Actions CI + 打包**——持续集成与发布产物。
+6. ~~GitHub Actions CI + 打包~~ ✅ 已做（M4 后续⑤）——云端自动构建 + 测试 + Release exe 打包，绕开本机 GitHub 443 不可达。
 
 ---
 
