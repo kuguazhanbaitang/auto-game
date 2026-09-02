@@ -11,9 +11,38 @@ use anyhow::{Result, anyhow, bail};
 use image::RgbaImage;
 
 use crate::action::Actions;
-use crate::adapter::Key;
+use crate::adapter::{Key, Match, key_from_str};
 use crate::report::{Report, Status};
 use crate::script::{Scenario, Step};
+
+/// 紧急停止（failsafe）：运行中按 F9 中止场景
+struct Failsafe {
+    enabled: bool,
+    device: Option<device_query::DeviceState>,
+}
+
+impl Failsafe {
+    fn new() -> Self {
+        let device = std::panic::catch_unwind(device_query::DeviceState::new).ok();
+        let enabled = device.is_some();
+        if !enabled {
+            tracing::warn!("failsafe 不可用：无法读取键盘状态（非交互会话？）");
+        }
+        Failsafe { enabled, device }
+    }
+
+    fn triggered(&self) -> bool {
+        use device_query::DeviceQuery;
+        if !self.enabled {
+            return false;
+        }
+        if let Some(d) = &self.device {
+            d.get_keys().iter().any(|k| *k == device_query::Keycode::F9)
+        } else {
+            false
+        }
+    }
+}
 
 /// 编译后的指令
 struct Instr {
@@ -50,6 +79,7 @@ pub struct Engine {
     report: Report,
     assets_dir: PathBuf,
     reports_dir: PathBuf,
+    failsafe: Failsafe,
 }
 
 impl Engine {
@@ -63,6 +93,7 @@ impl Engine {
             report: Report::new(scenario_name.to_string()),
             assets_dir,
             reports_dir: PathBuf::from("reports").join(safe_name),
+            failsafe: Failsafe::new(),
         }
     }
 
@@ -74,6 +105,18 @@ impl Engine {
         let mut exec_no = 0usize;
 
         while pc < instrs.len() {
+            if self.failsafe.triggered() {
+                tracing::warn!("failsafe 触发：检测到 F9，中止场景");
+                exec_no += 1;
+                self.report.record(
+                    exec_no,
+                    "failsafe",
+                    "用户按 F9 手动中止".to_string(),
+                    Status::Fail,
+                    Duration::ZERO,
+                );
+                break;
+            }
             let instr = &instrs[pc];
             match &instr.kind {
                 Kind::Action => {
@@ -172,11 +215,30 @@ impl Engine {
 
     /// 条件判断：模板是否出现（模板加载/匹配出错时返回 Err）
     fn if_image_hit(&self, step: &Step) -> Result<bool> {
+        Ok(self.find_match(step)?.is_some())
+    }
+
+    /// 在屏幕或指定区域内查找模板
+    fn find_match(&self, step: &Step) -> Result<Option<Match>> {
         let template = self.load_template(step)?;
         let precision = req_precision(step);
-        match self.actions.find_image(&template, precision)? {
-            Some(_) => Ok(true),
-            None => Ok(false),
+        match step.region {
+            Some(r) => self.actions.find_image_region(&template, precision, r),
+            None => self.actions.find_image(&template, precision),
+        }
+    }
+
+    /// 轮询等待模板出现（支持区域限定），超时返回 None
+    fn wait_match(&self, step: &Step, timeout: Duration) -> Result<Option<Match>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(m) = self.find_match(step)? {
+                return Ok(Some(m));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
     }
 
@@ -188,6 +250,7 @@ impl Engine {
             "move_mouse" => self.exec_move_mouse(step),
             "click" => self.exec_click(step),
             "key_press" => self.exec_key_press(step),
+            "key_combo" => self.exec_key_combo(step),
             "type_text" => self.exec_type_text(step),
             "find_image" => self.exec_find_image(step),
             "wait_image" => self.exec_wait_image(step),
@@ -227,15 +290,20 @@ impl Engine {
     }
 
     fn exec_key_press(&self, step: &Step) -> Result<String> {
-        let key = step.key.as_deref().ok_or_else(|| anyhow!("key_press 缺少 key 参数"))?;
-        let key = match key {
-            "enter" => Key::Enter,
-            "escape" => Key::Escape,
-            "space" => Key::Space,
-            other => bail!("暂不支持的按键: {other}"),
-        };
+        let name = step.key.as_deref().ok_or_else(|| anyhow!("key_press 缺少 key 参数"))?;
+        let key = key_from_str(name)?;
         self.actions.key_press(key)?;
-        Ok(format!("按下按键 {key:?}"))
+        Ok(format!("按下按键 {name}"))
+    }
+
+    fn exec_key_combo(&self, step: &Step) -> Result<String> {
+        let names = step
+            .keys
+            .as_deref()
+            .ok_or_else(|| anyhow!("key_combo 缺少 keys 参数（如 keys = [\"ctrl\", \"a\"]）"))?;
+        let keys: Vec<Key> = names.iter().map(|n| key_from_str(n)).collect::<Result<_>>()?;
+        self.actions.key_combo(&keys)?;
+        Ok(format!("组合键 {}", names.join(" + ")))
     }
 
     fn exec_type_text(&self, step: &Step) -> Result<String> {
@@ -247,9 +315,7 @@ impl Engine {
     // ---- 图像识别类动作 ----
 
     fn exec_find_image(&self, step: &Step) -> Result<String> {
-        let template = self.load_template(step)?;
-        let precision = req_precision(step);
-        match self.actions.find_image(&template, precision)? {
+        match self.find_match(step)? {
             Some(m) => Ok(format!(
                 "找到模板：位置 ({}, {}), 置信度 {:.4}",
                 m.x, m.y, m.confidence
@@ -259,10 +325,8 @@ impl Engine {
     }
 
     fn exec_wait_image(&self, step: &Step) -> Result<String> {
-        let template = self.load_template(step)?;
-        let precision = req_precision(step);
         let timeout = req_timeout(step);
-        match self.actions.wait_image(&template, precision, timeout)? {
+        match self.wait_match(step, timeout)? {
             Some(m) => Ok(format!(
                 "等待到模板：位置 ({}, {}), 置信度 {:.4}",
                 m.x, m.y, m.confidence
@@ -272,18 +336,21 @@ impl Engine {
     }
 
     fn exec_click_image(&self, step: &Step) -> Result<String> {
-        let template = self.load_template(step)?;
-        let precision = req_precision(step);
-        self.actions.click_image(&template, precision)?;
-        Ok(format!("点击模板图像中心（precision={precision}）"))
+        let m = self
+            .find_match(step)?
+            .ok_or_else(|| anyhow!("click_image 失败：未找到目标图像"))?;
+        let (cx, cy) = m.center();
+        self.actions.move_mouse(cx, cy)?;
+        self.actions.click()?;
+        Ok(format!("点击模板中心 ({cx}, {cy})，置信度 {:.4}", m.confidence))
     }
 
     fn exec_assert_image(&self, step: &Step) -> Result<String> {
-        let template = self.load_template(step)?;
-        let precision = req_precision(step);
         let timeout = req_timeout(step);
-        self.actions.assert_image(&template, precision, timeout)?;
-        Ok(format!("断言通过：模板存在（precision={precision}）"))
+        if self.wait_match(step, timeout)?.is_none() {
+            bail!("assert_image 失败：{timeout:?} 内未找到目标图像");
+        }
+        Ok(format!("断言通过：模板存在（precision={}）", req_precision(step)))
     }
 
     // ---- 辅助 ----
@@ -309,7 +376,7 @@ impl Engine {
 fn compile(steps: &[Step]) -> Result<Vec<Instr>> {
     enum Ctl {
         Repeat(usize),
-        If(usize),
+        If { start: usize, else_idx: Option<usize> },
     }
     let mut instrs: Vec<Instr> = Vec::new();
     let mut stack: Vec<Ctl> = Vec::new();
@@ -338,22 +405,26 @@ fn compile(steps: &[Step]) -> Result<Vec<Instr>> {
                     step: step.clone(),
                     kind: Kind::IfImage { else_or_end: usize::MAX, end: usize::MAX },
                 });
-                stack.push(Ctl::If(idx));
+                stack.push(Ctl::If { start: idx, else_idx: None });
             }
             "else" => {
                 let if_idx = match stack.last() {
-                    Some(Ctl::If(i)) => *i,
+                    Some(Ctl::If { start, .. }) => *start,
                     _ => bail!("else 无匹配的 if_image"),
                 };
                 let else_idx = instrs.len();
+                // 记录 else 指令索引（end_if 时回填 Else.end）
+                if let Some(Ctl::If { else_idx: slot, .. }) = stack.last_mut() {
+                    *slot = Some(else_idx);
+                }
                 if let Kind::IfImage { else_or_end, .. } = &mut instrs[if_idx].kind {
                     *else_or_end = else_idx;
                 }
                 instrs.push(Instr { step: step.clone(), kind: Kind::Else { end: usize::MAX } });
             }
             "end_if" => {
-                let if_idx = match stack.pop() {
-                    Some(Ctl::If(i)) => i,
+                let (if_idx, else_idx) = match stack.pop() {
+                    Some(Ctl::If { start, else_idx }) => (start, else_idx),
                     _ => bail!("end_if 无匹配的 if_image"),
                 };
                 let end_idx = instrs.len();
@@ -362,6 +433,12 @@ fn compile(steps: &[Step]) -> Result<Vec<Instr>> {
                         *else_or_end = end_idx;
                     }
                     *end = end_idx;
+                }
+                // 若存在 else，把其跳转也指向 end_if
+                if let Some(ei) = else_idx {
+                    if let Kind::Else { end } = &mut instrs[ei].kind {
+                        *end = end_idx;
+                    }
                 }
                 instrs.push(Instr { step: step.clone(), kind: Kind::EndIf });
             }
@@ -400,4 +477,120 @@ pub fn run_scenario(scenario_path: &Path, assets_dir: PathBuf) -> Result<bool> {
         .unwrap_or_else(|| "未命名场景".to_string());
     let mut engine = Engine::new(&name, assets_dir);
     engine.run(&scenario)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(action: &str) -> Step {
+        toml::from_str(&format!("action = \"{action}\"")).expect("构造步骤失败")
+    }
+
+    fn kind_of(instr: &Instr) -> &Kind {
+        &instr.kind
+    }
+
+    #[test]
+    fn compile_simple_actions() {
+        let steps = vec![step("wait"), step("click"), step("screenshot")];
+        let instrs = compile(&steps).unwrap();
+        assert_eq!(instrs.len(), 3);
+        for i in 0..3 {
+            assert!(matches!(kind_of(&instrs[i]), Kind::Action));
+        }
+    }
+
+    #[test]
+    fn compile_repeat_pairs_jumps() {
+        let steps = vec![step("repeat"), step("click"), step("end_repeat")];
+        let instrs = compile(&steps).unwrap();
+        assert_eq!(instrs.len(), 3);
+        match kind_of(&instrs[0]) {
+            Kind::Repeat { end } => assert_eq!(*end, 2),
+            _ => panic!("repeat 应为 Repeat"),
+        }
+        match kind_of(&instrs[2]) {
+            Kind::EndRepeat { back } => assert_eq!(*back, 0),
+            _ => panic!("end_repeat 应为 EndRepeat"),
+        }
+    }
+
+    #[test]
+    fn compile_if_else_fills_jumps() {
+        let steps = vec![
+            step("if_image"),
+            step("click"),
+            step("else"),
+            step("wait"),
+            step("end_if"),
+        ];
+        let instrs = compile(&steps).unwrap();
+        assert_eq!(instrs.len(), 5);
+        match kind_of(&instrs[0]) {
+            Kind::IfImage { else_or_end, end } => {
+                assert_eq!(*else_or_end, 2, "else 分支位置");
+                assert_eq!(*end, 4, "end_if 位置");
+            }
+            _ => panic!("if_image 应为 IfImage"),
+        }
+        match kind_of(&instrs[2]) {
+            Kind::Else { end } => assert_eq!(*end, 4),
+            _ => panic!("else 应为 Else"),
+        }
+    }
+
+    #[test]
+    fn compile_if_without_else_jumps_to_end() {
+        let steps = vec![step("if_image"), step("click"), step("end_if")];
+        let instrs = compile(&steps).unwrap();
+        match kind_of(&instrs[0]) {
+            Kind::IfImage { else_or_end, end } => {
+                assert_eq!(*else_or_end, 2);
+                assert_eq!(*end, 2);
+            }
+            _ => panic!("if_image 应为 IfImage"),
+        }
+    }
+
+    #[test]
+    fn compile_unclosed_if_is_error() {
+        let steps = vec![step("if_image"), step("click")];
+        assert!(compile(&steps).is_err(), "缺少 end_if 应报错");
+    }
+
+    #[test]
+    fn compile_stray_end_is_error() {
+        assert!(compile(&[step("end_repeat")]).is_err());
+        assert!(compile(&[step("end_if")]).is_err());
+        assert!(compile(&[step("else")]).is_err());
+    }
+
+    #[test]
+    fn compile_nested_repeat_and_if() {
+        let steps = vec![
+            step("repeat"),      // 0
+            step("if_image"),    // 1
+            step("click"),       // 2
+            step("end_if"),      // 3
+            step("end_repeat"),  // 4
+        ];
+        let instrs = compile(&steps).unwrap();
+        assert_eq!(instrs.len(), 5);
+        match kind_of(&instrs[0]) {
+            Kind::Repeat { end } => assert_eq!(*end, 4),
+            _ => panic!(),
+        }
+        match kind_of(&instrs[1]) {
+            Kind::IfImage { else_or_end, end } => {
+                assert_eq!(*else_or_end, 3);
+                assert_eq!(*end, 3);
+            }
+            _ => panic!(),
+        }
+        match kind_of(&instrs[4]) {
+            Kind::EndRepeat { back } => assert_eq!(*back, 0),
+            _ => panic!(),
+        }
+    }
 }

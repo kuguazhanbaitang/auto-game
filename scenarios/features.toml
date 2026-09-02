@@ -1,0 +1,59 @@
+# 特性测试用例：组合键 / 区域匹配 / 控制流组合
+# 用法: cargo run -- run scenarios/features.toml
+#
+# 覆盖新打磨能力：
+# - key_combo 组合键（Ctrl+A）
+# - key_press 游戏常用键（WASD / 空格）
+# - region 区域限定查找（缩小搜索范围，提升性能）
+# - repeat + if_image + else 组合（带 region）
+#
+# 注意：在无交互桌面环境运行时，输入类动作（key_combo/key_press）会被
+# 系统拦截（UIPI）而 FAIL，属环境限制；真实桌面 + 前台游戏窗口下正常。
+
+[meta]
+name = "特性演示（组合键 + 区域 + 控制流）"
+
+# 组合键：全选
+[[step]]
+action = "key_combo"
+keys = ["ctrl", "a"]
+
+# 游戏移动键：向前
+[[step]]
+action = "key_press"
+key = "w"
+
+# 区域限定的查找（区域 500x400，模板不存在 → 未命中并记录）
+[[step]]
+action = "find_image"
+image = "nonexistent.png"
+precision = 0.8
+region = { x = 0, y = 0, w = 500, h = 400 }
+
+# 循环 2 次：若区域内出现弹窗则按空格跳过，否则等待
+[[step]]
+action = "repeat"
+count = 2
+
+[[step]]
+action = "if_image"
+image = "nonexistent.png"
+region = { x = 0, y = 0, w = 200, h = 200 }
+precision = 0.8
+
+[[step]]
+action = "key_press"
+key = "space"
+
+[[step]]
+action = "else"
+
+[[step]]
+action = "wait"
+seconds = 0.1
+
+[[step]]
+action = "end_if"
+
+[[step]]
+action = "end_repeat"

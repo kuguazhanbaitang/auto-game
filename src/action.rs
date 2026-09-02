@@ -8,7 +8,8 @@ use anyhow::{Result, bail};
 use image::RgbaImage;
 
 use crate::adapter::{
-    CaptureBackend, CaptureTrait, InputBackend, InputTrait, Key, Match, VisionBackend, VisionTrait,
+    CaptureBackend, CaptureTrait, InputBackend, InputTrait, Key, Match, Region, VisionBackend,
+    VisionTrait,
 };
 
 /// 组合动作执行器
@@ -47,6 +48,11 @@ impl Actions {
         self.input.key_press(key)
     }
 
+    /// 组合键：先全部按下，再逆序释放（如 Ctrl+A）
+    pub fn key_combo(&self, keys: &[Key]) -> Result<()> {
+        self.input.key_combo(keys)
+    }
+
     /// 输入一段文本
     pub fn type_text(&self, text: &str) -> Result<()> {
         self.input.type_text(text)
@@ -56,6 +62,24 @@ impl Actions {
     pub fn find_image(&self, template: &RgbaImage, precision: f64) -> Result<Option<Match>> {
         let screen = self.capture.capture_full()?;
         self.vision.find_template(&screen, template, precision)
+    }
+
+    /// 在指定区域内查找模板（性能优化：避免全屏匹配，坐标已加区域偏移）
+    pub fn find_image_region(
+        &self,
+        template: &RgbaImage,
+        precision: f64,
+        region: Region,
+    ) -> Result<Option<Match>> {
+        let screen = self.capture.capture_region(region.x, region.y, region.w, region.h)?;
+        match self.vision.find_template(&screen, template, precision)? {
+            Some(m) => Ok(Some(Match {
+                x: m.x + region.x,
+                y: m.y + region.y,
+                ..m
+            })),
+            None => Ok(None),
+        }
     }
 
     /// 找到模板后移动到其中心并左键点击；找不到则报错
