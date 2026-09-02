@@ -33,6 +33,11 @@ impl Actions {
         self.capture.capture_full()
     }
 
+    /// 截取指定屏幕区域（左上角 + 宽高）
+    pub fn capture_region(&self, x: i32, y: i32, w: u32, h: u32) -> Result<RgbaImage> {
+        self.capture.capture_region(x, y, w, h)
+    }
+
     /// 移动鼠标到屏幕绝对坐标
     pub fn move_mouse(&self, x: i32, y: i32) -> Result<()> {
         self.input.move_mouse(x, y)
