@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
-use image::RgbaImage;
+use image::{Rgba, RgbaImage, imageops};
 
 use crate::action::Actions;
 use crate::adapter::{Key, Match, key_from_str};
@@ -128,13 +128,16 @@ impl Engine {
                         Ok(detail) => self.report.record(
                             exec_no, &instr.step.action, detail, Status::Pass, duration,
                         ),
-                        Err(e) => self.report.record(
-                            exec_no,
-                            &instr.step.action,
-                            format!("{e:#}"),
-                            Status::Fail,
-                            duration,
-                        ),
+                        Err(e) => {
+                            let snap = self.save_failure_snapshot(&instr.step, exec_no);
+                            self.report.record(
+                                exec_no,
+                                &instr.step.action,
+                                format!("{e:#}{snap}"),
+                                Status::Fail,
+                                duration,
+                            );
+                        }
                     }
                     pc += 1;
                 }
@@ -179,10 +182,11 @@ impl Engine {
                             }
                         }
                         Err(e) => {
+                            let snap = self.save_failure_snapshot(&instr.step, exec_no);
                             self.report.record(
                                 exec_no,
                                 &instr.step.action,
-                                format!("{e:#}"),
+                                format!("{e:#}{snap}"),
                                 Status::Fail,
                                 duration,
                             );
@@ -370,6 +374,65 @@ impl Engine {
         }
         Ok(p)
     }
+
+    /// 步骤失败时自动存档「现场截图」（有 region 用区域，否则全屏）；
+    /// 若该步带模板，再生成一张「左=旧模板 / 右=现场」对照图，便于核对 UI 变更。
+    /// 任一环节失败仅记录日志，不阻断主流程。返回追加到报告详情中的文本。
+    fn save_failure_snapshot(&self, step: &Step, index: usize) -> String {
+        let mut notes = Vec::new();
+        let shot = match step.region {
+            Some(r) => self.actions.capture_region(r.x, r.y, r.w, r.h),
+            None => self.actions.capture_full(),
+        };
+        let shot_img = match shot {
+            Ok(img) => img,
+            Err(e) => {
+                tracing::warn!("失败存档：现场截图失败 {e:#}");
+                return String::new();
+            }
+        };
+        if std::fs::create_dir_all(&self.reports_dir).is_err() {
+            tracing::warn!("失败存档：无法创建报告目录 {}", self.reports_dir.display());
+            return String::new();
+        }
+        // 现场截图
+        let shot_path = self.reports_dir.join(format!("fail_step_{index}.png"));
+        match shot_img.save(&shot_path) {
+            Ok(_) => notes.push(format!("现场截图: {}", shot_path.display())),
+            Err(e) => tracing::warn!("失败存档：保存现场截图失败 {e:#}"),
+        }
+        // 新旧对照图（左=模板，右=现场）
+        if let Some(name) = step.image.as_deref() {
+            if let Ok(tpl) = self.load_template(step) {
+                let diff = build_diff_image(&tpl, &shot_img);
+                let diff_path = self.reports_dir.join(format!("diff_step_{index}.png"));
+                match diff.save(&diff_path) {
+                    Ok(_) => notes.push(format!(
+                        "新旧对照(左=模板 {} / 右=现场): {}",
+                        name,
+                        diff_path.display()
+                    )),
+                    Err(e) => tracing::warn!("失败存档：保存对照图失败 {e:#}"),
+                }
+            }
+        }
+        if notes.is_empty() {
+            String::new()
+        } else {
+            format!("\n  失败存档: {}", notes.join("\n  失败存档: "))
+        }
+    }
+}
+
+/// 水平拼接「旧模板 + 分隔线 + 现场截图」为对照图（高度取最大，白底浅灰）
+fn build_diff_image(old: &RgbaImage, new: &RgbaImage) -> RgbaImage {
+    let h = old.height().max(new.height());
+    let sep = 10u32;
+    let w = old.width() + new.width() + sep;
+    let mut canvas = RgbaImage::from_pixel(w, h, Rgba([244, 246, 250, 255]));
+    imageops::overlay(&mut canvas, old, 0, 0);
+    imageops::overlay(&mut canvas, new, (old.width() + sep) as i64, 0);
+    canvas
 }
 
 /// 把扁平步骤编译成指令序列（配对控制结构、填充跳转）
@@ -592,5 +655,20 @@ mod tests {
             Kind::EndRepeat { back } => assert_eq!(*back, 0),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn diff_image_pads_to_max_height() {
+        use image::RgbaImage;
+        let old = RgbaImage::from_pixel(20, 10, Rgba([255, 0, 0, 255]));
+        let new = RgbaImage::from_pixel(30, 14, Rgba([0, 0, 255, 255]));
+        let diff = build_diff_image(&old, &new);
+        // 宽 = 20 + 30 + 分隔 10；高取最大 14
+        assert_eq!(diff.width(), 60);
+        assert_eq!(diff.height(), 14);
+        // 左侧应为旧模板红色像素
+        assert_eq!(diff.get_pixel(0, 0), &Rgba([255, 0, 0, 255]));
+        // 右侧应为新模板蓝色像素（偏移 = 20 + 10）
+        assert_eq!(diff.get_pixel(30, 0), &Rgba([0, 0, 255, 255]));
     }
 }
