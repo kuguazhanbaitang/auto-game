@@ -214,6 +214,39 @@
 - **边界**：`click_delay` 缺省 / `≤0`，或 `min ≥ max` → 不延时（向后兼容）；`min` 自动 clamp 到 `[0, max]`。
 - **涉及**：`script.rs`（Step 加 `click_delay`/`click_delay_min` + `Default` derive + 解析单测）、`engine.rs`（`exec_click`/`exec_click_image` 插延时 + `random_click_delay` 函数 + 报告显示延时 + 4 单测）、README/design.md 同步；测试 33→**37**。
 
+### M4 后续②：OCR 文字识别（2026-09-02，本地未推送）
+
+#### 需求与选型决策链（为什么最终选 paddleocr_rs_onnx）
+
+用户指令仅"OCR"二字，目标：识别游戏界面中文文字（血量/数值/标题/弹窗文案），与既有模板匹配互补。**选型三连败后定案**：
+
+| 候选 | 失败原因 | 结论 |
+|---|---|---|
+| tesseract | 本机未安装系统引擎；需用户手动装 tesseract + 中文语言包 | ❌ 依赖系统环境 |
+| ocr-rs（MNN） | 编译期须从 GitHub releases 下载预编译 MNN 库；**GitHub HTTPS 443 在本机不可达**（贯穿全程的痛点，推送也走 MCP） | ❌ 网络不可达 |
+| ocrs + RTen | 纯 Rust ONNX 推理最诱人（crates.io 走 rsproxy 可编译），但 `Model::load` **只认 .rten 私有 flatbuffers 格式、不认标准 ONNX protobuf**；且 ocrs 官方明示**只支持 Latin 字母**、预处理硬编码灰度，与 PP-OCRv4 中文 RGB 不匹配 | ❌ 格式/能力双不兼容 |
+| **paddleocr_rs_onnx 0.2.7** | 全 Rust ONNX Runtime 绑定 + 标准 ONNX 模型 + 完整中文支持 + `OcrBlock` 带置信度/坐标 + MIT 协议，恰好匹配已下载的 PP-OCRv4 标准 ONNX | ✅ **选中** |
+
+#### 关键工程处理
+
+| 事项 | 处理 | 原因 |
+|---|---|---|
+| 上游编译 bug | **vendor 本地打补丁**：`configure_session_builder` 无条件引用 `ort::ep::{DirectML,CUDA,OpenVINO,NNAPI,CoreML,CANN}`，被 ort 2.0.0-rc 的 feature gate 掉 → 默认 features 下 6 个 E0433；为各 EP 分支加 `#[cfg(feature)]` 门控、未启用落回 CPU | 上游默认配置编译不过，vendor 是最小侵入修复 |
+| rec 输入动态 shape bug | **识别全空（0 行）的根因修复**：rec 模型输入为全动态 shape `[-1,3,-1,-1]`，上游 `(-1).max(1)=1` 把高度算成 1 → rec 输入被压成 1px 高、argmax 全 blank。修正为动态维度回退 **PP-OCRv4 标准高度 48** | 通过 probe 分段 + vendor 插桩定位到 `rec_shape.get(2)=1`；修复后中文实测全部命中 |
+| onnxruntime.dll 获取 | pip 清华镜像（pypi.org 默认不可达）下载 onnxruntime wheel → 解压提取 `onnxruntime.dll` + `onnxruntime_providers_shared.dll` 到 `libs/` | 运行时需 `ORT_DYLIB_PATH` 指向 dll |
+| C 盘磁盘耗尽 | C 盘仅剩 564MB（target 3.8GB）→ **target 整体迁移 `D:\auto-game-target`**，项目加 `.cargo/config.toml` 指向 | 腾出 C 盘 4GB；D 盘空闲 172.9GB |
+| 模型下载源 | ModelScope RapidAI/RapidOCR 仓库成功（hf-mirror/huggingface.co 401/超时/404 不可用）→ `assets/ocr/`（det/rec ONNX + ppocr_keys_v1.txt 6623 字符） | 随仓库提交，克隆即用 |
+
+#### 功能实现
+
+- `adapter/ocr.rs`：`OcrTrait` + `OcrBackend`（`load` 读 det/rec/keys 三文件、`recognize`、`recognize_region` 区域裁剪+坐标偏移）；`OcrLine{text,x,y,w,h,confidence}` + `center()`；白图 smoke 测试。
+- `engine.rs` 接入 4 个 OCR 动作：`ocr_text`（识别输出）/ `if_text`（文字条件分支，与 `if_image` 共用控制流编译）/ `click_text`（按文字点击，jitter 限制在文字行内）/ `assert_text`（轮询等待文字出现）；`Engine` 持 `Mutex<Option<Arc<OcrBackend>>>` **懒加载**（纯图像场景零开销）。
+- `script.rs`：复用 `text` 字段（type_text 输入 / OCR 期望子串）与 `region`，无新字段。
+- 文字匹配语义：`text` 子串 contains（大小写敏感），命中多行取置信度最高者。
+- 测试 37→**39**（+if_text 编译分支、全量回归）。
+
+**验证**：中文测试图（600×140 微软雅黑渲染"龙之谷 阴阳师 12345 / 进入副本 开始游戏"）实识别 2 行全部命中、置信度 1.0；白图 smoke 1.11s 无异常；`cargo test -j 1` 39 passed + 3 ignored。
+
 ---
 
 ## 四、关键技术机制复盘（深入原理）
@@ -265,7 +298,24 @@
      → 用 template 命令重新采集新模板 → 场景更新 → 闭环
 ```
 
-### 4.6 已知坑（design.md §8，踩过并记录）
+### 4.7 OCR 接入复盘（为什么这条路才通）
+
+```
+需求：读游戏界面中文文字（血量/数值/标题/弹窗文案）
+模板匹配做不到（只能认"图"，认不了"字"）
+→ tesseract     需系统引擎+中文包 → 依赖用户环境，弃
+→ ocr-rs(MNN)   编译期从 GitHub 下载预编译库 → 443 不可达，弃
+→ ocrs(RTen)    纯 Rust 最诱人，但只认 .rten 私有格式 + 仅 Latin → 弃
+→ paddleocr_rs_onnx  ONNX Runtime + 标准 ONNX + 中文 + 置信度/坐标 → ✅
+   └ vendor patch × 2：EP feature gate + rec 动态 shape 高度=48
+   └ 实测中文识别准确（"龙之谷阴阳师12345" 全部命中）
+```
+
+- **为什么 vendor 而不是提 PR/绕开**：上游默认 features 编译不过（ort 2.0.0-rc 的 EP 引用被 feature 门控），本地 vendor + 最小补丁是当时唯一能编译通过且可控的路径；`Cargo.toml` 以 `path` 依赖指向 vendor，行为与正常依赖一致。
+- **为什么 rec 高度=48**：PP-OCRv4 mobile rec 输入固定高度 48、宽度动态（最大到训练宽度）；上游从动态 shape 读 `get(2)=-1` 后 `max(1)` 得到 1——这是"能编译、能跑、但识别全空"的典型隐性 bug，靠**分段插桩 + shape 打印**才定位到。
+- **懒加载设计**：OCR 模型 ~15MB，纯图像场景不应付出加载代价 → `Mutex<Option<Arc<OcrBackend>>>`，首次用到才 load，之后克隆 Arc 复用。
+
+### 4.8 已知坑（design.md §8，踩过并记录）
 
 | 坑 | 原因 | 对策 |
 |---|---|---|
@@ -273,6 +323,8 @@
 | image 路径带 `assets/` 前缀 | 路径相对 assets 目录再拼接 | 直接写文件名 |
 | 非交互会话输入被 UIPI 拦截 | Windows 会话隔离 | 真实桌面 + 前台窗口 + 管理员/白名单；move_mouse 不受限可先验证坐标 |
 | 远程 443 不可达 | GitHub HTTPS 不稳 | 走 MCP API 推送（工具通道） |
+| OCR rec 模型全动态 shape 导致识别全空 | 上游 `(-1).max(1)=1` 把高度算成 1 | vendor patch：动态维度回退 PP-OCRv4 标准高度 48 |
+| OCR 运行时缺 onnxruntime.dll | Windows 无全局 ONNX Runtime | 随仓库提供 `libs/`，设 `ORT_DYLIB_PATH` 指向 dll |
 
 ---
 
@@ -295,16 +347,18 @@
 | 打磨轮前 | 无 | 0 | — |
 | 打磨轮 | 22 | 2 | 解析/控制流/报告/按键/jitter/对照图 |
 | fast→exact 后 | 25 | 3 | +确认一致性/兜底/解析默认值 |
-| step 级后（当前） | **26** | **3** | +步骤级覆盖解析 |
+| step 级后 | 26 | 3 | +步骤级覆盖解析 |
 | M4 窗口捕获后 | **33** | **3** | +窗口捕获 4 单测、坐标映射 3 单测 |
 | 点击随机延时后 | **37** | **3** | +click_delay 解析 1 单测、延时区间 4 单测 |
+| OCR 接入后 | **39** | **3** | +if_text 条件编译 1 单测、OCR smoke 1 单测 |
 
 ### 5.3 工程状态
 
-- 本地 HEAD：`3fe3e8d`（step-level verify_exact override）
-- 构建/测试：`cargo test --quiet` → 26 passed + 3 ignored，全绿
-- 依赖：rustautogui 2.5 / xcap 0.2 / enigo 0.2 / image 0.25 / imageproc 0.25 / rayon 1 / serde 1 / toml 0.8 / anyhow 1 / tracing 0.1 / tracing-subscriber 0.3 / device_query 4.0.1
-- 远程推送状态：`3fe3e8d` 之后的改动**已提交本地，远程尚未推送**（按用户指示暂缓）
+- 本地 HEAD：`a4d0df4`（feat: random click delay）之后**未提交**——OCR 相关改动（engine/script/ocr.rs/vendor patch/libs/assets）均在本地工作区
+- 构建/测试：`cargo test -j 1` → 39 passed + 3 ignored，全绿
+- 依赖新增：`paddleocr_rs_onnx 0.2.7`（path → vendor）、`log 0.4`（paddle 日志）
+- 运行环境：`target-dir = "D:/auto-game-target"`（`.cargo/config.toml`，C 盘空间迁移）；OCR 运行需 `$env:ORT_DYLIB_PATH = (Resolve-Path "libs\onnxruntime.dll").Path`
+- 远程推送状态：本地未推送（按用户指示，推送由用户/MCP 决定）
 
 ---
 
@@ -327,13 +381,18 @@
 | 模板匹配加速（金字塔+并行 ≈88x） | 打磨轮 |
 | fast→exact 确认开关（meta 全局） | 打磨轮 |
 | step 级 verify_exact 覆盖 | 打磨轮 |
+| 窗口级捕获 + 坐标映射 | M4 |
+| 点击随机延时（click_delay） | M4 后续① |
+| OCR 文字识别（ocr_text/if_text/click_text/assert_text） | M4 后续② |
 
 ### M4 候选（按用户优先级推进）
 
-1. **窗口级捕获 + 坐标映射**（推荐先做）——龙之谷是窗口模式、阴阳师是多开模拟器，全屏截图会截错/被遮挡；这是解锁真实游戏适配的前置能力。
-2. **点击随机延时**——配合 jitter 进一步拟人化，成本最低。
-3. **场景静态校验（validate 子命令）**——不实际跑场景就能检查 TOML 语法 / 模板存在 / 控制流闭合。
-4. **OCR 接入**（tesseract-rs / ddddocr）——读血量/数值，工作量最大，建议最后。
+1. ~~窗口级捕获 + 坐标映射~~ ✅ 已做
+2. ~~点击随机延时~~ ✅ 已做
+3. ~~OCR 接入~~ ✅ 已做（paddleocr_rs_onnx + PP-OCRv4）
+4. **GUI 录制器（egui）**——可视化编排场景、录制点击序列，进一步降低上手门槛。
+5. **场景静态校验（validate 子命令）**——不实际跑场景就能检查 TOML 语法 / 模板存在 / 控制流闭合 / OCR 模型存在。
+6. **GitHub Actions CI + 打包**——持续集成与发布产物。
 
 ---
 

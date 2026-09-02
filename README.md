@@ -18,9 +18,10 @@
 - **紧急停止（failsafe）**：运行中随时按 `F9` 中止，防止脚本失控
 - **失败现场存档**：任一步骤失败自动保存现场截图；若该步带模板，再生成「左=旧模板 / 右=现场」对照图，UI 变更一目了然
 - **拟人化点击**：点击动作支持 `jitter` 随机抖动——每次点击位置在目标周围动态分布，不总点同一个像素，更接近真人操作
+- **OCR 文字识别**：`ocr_text` / `if_text` / `click_text` / `assert_text`——识别游戏界面文字（血量/数值/标题/弹窗文案），与模板匹配互补（模板回答"某图在不在/在哪"，OCR 回答"这里写了什么"）
 - **组合键**：`key_combo` 支持 Ctrl+A 等组合键；按键覆盖游戏常用键位（WASD/数字/F1-F12/方向/修饰键）
 - **报告**：文本报告 + HTML 报告（状态着色、耗时统计、注入转义）
-- **可插拔后端**：截图 / 输入 / 识别全部封装在 trait 之后，可替换底层库（xcap / enigo / rustautogui）
+- **可插拔后端**：截图 / 输入 / 识别 / OCR 全部封装在 trait 之后，可替换底层库（xcap / enigo / rustautogui / paddleocr_rs_onnx）
 
 ---
 
@@ -161,6 +162,34 @@ timeout = 20
 | `assert_image` | `image`, `precision`, `timeout`, `region` | 断言模板在超时内出现；否则失败 |
 | `if_image` | `image`, `precision`, `region` | 条件判断：命中走 then 分支，未命中走 else/跳过 |
 
+### OCR 文字识别动作（与模板匹配互补）
+
+| action | 参数 | 说明 |
+|---|---|---|
+| `ocr_text` | `region` | 识别区域内文字并输出到报告（回答"这片区域写了什么"） |
+| `if_text` | `text`, `region` | 条件判断：识别到包含 `text` 的文字走 then 分支，否则走 else/跳过 |
+| `click_text` | `text`, `region`, `jitter`, `click_delay` | 识别到包含 `text` 的文字行后点击其中心；未识别到则失败 |
+| `assert_text` | `text`, `region`, `timeout` | 断言在超时内识别到包含 `text` 的文字；否则失败 |
+
+**OCR 示例**（识别血量 + 按文字点击 + 文案断言）：
+```toml
+[[step]]
+action = "ocr_text"
+region = { x = 20, y = 20, w = 300, h = 80 }   # 读取左上角数值区
+
+[[step]]
+action = "click_text"                            # 点击「开始战斗」按钮
+text = "开始战斗"
+region = { x = 800, y = 600, w = 400, h = 300 }
+
+[[step]]
+action = "assert_text"                           # 等待结算文案出现
+text = "胜利"
+timeout = 30
+```
+
+> `text` 为**包含子串**匹配（大小写敏感），命中多行时取置信度最高者；`click_text` 的 `jitter` 偏移限制在文字行范围内。
+
 ### 通用参数
 
 | 参数 | 适用动作 | 说明 |
@@ -171,6 +200,7 @@ timeout = 20
 | `jitter` | `click` / `click_image` | 点击随机抖动像素，每次点击在目标 ±N 内动态分布，默认 `0`（精确点击） |
 | `click_delay` | `click` / `click_image` | 点击前随机延时（秒）：每次点击前随机等待 `[0, click_delay]`，拟人化；缺省/`≤0` 不延时 |
 | `click_delay_min` | `click` / `click_image` | 点击随机延时下限（秒），配合 `click_delay` 组成 `[min, max]` 区间（可选） |
+| `text` | `type_text` / OCR 文字类 | 输入文本；OCR 类动作用作「期望包含子串」匹配 |
 | `verify_exact` | 图像类 | 按步骤覆盖全局开关：显式 `true` / `false` 覆盖 `[meta] verify_exact`，缺省回退全局值 |
 
 **全局开关（`[meta]`）**：
@@ -185,7 +215,8 @@ timeout = 20
 |---|---|---|
 | `repeat` | `count` | 开始循环（`count` 次），与 `end_repeat` 配对 |
 | `end_repeat` | — | 结束循环 |
-| `if_image` | `image` 等 | 开始条件分支，与 `end_if` 配对 |
+| `if_image` | `image` 等 | 开始条件分支（模板匹配），与 `end_if` 配对 |
+| `if_text` | `text` 等 | 开始条件分支（OCR 文字匹配），与 `end_if` 配对 |
 | `else` | — | 否则分支（可选） |
 | `end_if` | — | 结束条件 |
 
@@ -334,6 +365,64 @@ window = "MuMu模拟器"   # 按标题关键字匹配窗口（contains，不区�
 
 ---
 
+## 🔤 OCR 文字识别（PP-OCRv4 中文）
+
+模板匹配只能回答「某图像在不在/在哪」，**读不出动态文字**（血量、数值、标题、弹窗文案）。OCR 补齐这块：识别区域内的文字并输出坐标/置信度，可做条件分支、按文字点击、文字断言。
+
+**模型与运行时已随仓库提供**（克隆即用，无需手工下载）：
+- `assets/ocr/` — PP-OCRv4 中文模型（检测 `ch_PP-OCRv4_det_mobile.onnx` + 识别 `ch_PP-OCRv4_rec_mobile.onnx` + 字符集 `ppocr_keys_v1.txt`，来自 ModelScope RapidAI/RapidOCR）
+- `libs/` — ONNX Runtime 动态库（`onnxruntime.dll` + `onnxruntime_providers_shared.dll`）
+
+**运行前设置动态库路径**（PowerShell）：
+```powershell
+$env:ORT_DYLIB_PATH = (Resolve-Path "libs\onnxruntime.dll").Path
+```
+
+模型在**首次用到 OCR 动作时懒加载**（纯图像场景零开销）；识别区域尽量用 `region` 收窄以提速。
+
+**动作**：`ocr_text`（识别输出）/ `if_text`（文字条件分支）/ `click_text`（按文字点击）/ `assert_text`（等待文字出现），详见「动作参考」。
+
+**典型场景**（阴阳师刷本，识别 + 按文字操作 + 文案断言）：
+```toml
+[meta]
+name = "阴阳师-刷本"
+window = "MuMu模拟器"
+
+[[step]]
+action = "wait_image"          # 模板等待：进入副本按钮
+image = "yyj_dungeon_btn.png"
+region = { x = 300, y = 700, w = 400, h = 200 }
+
+[[step]]
+action = "click_image"
+image = "yyj_dungeon_btn.png"
+
+[[step]]
+action = "click_text"          # 文字点击：「开始战斗」（无需为文字做模板）
+text = "开始战斗"
+region = { x = 500, y = 500, w = 500, h = 300 }
+
+[[step]]
+action = "repeat"              # 重复刷本，直到胜利/失败文案出现
+count = 50
+
+[[step]]
+action = "if_text"             # 检测到「胜利」→ 结算处理
+text = "胜利"
+
+[[step]]
+action = "click_image"
+image = "yyj_confirm_btn.png"
+
+[[step]]
+action = "end_if"
+
+[[step]]
+action = "end_repeat"
+```
+
+---
+
 ## 🖼️ 区域匹配与性能（性能要点）
 
 **背景**：默认的模板匹配是"全屏截取 → 算法扫描"，M1 实测 imageproc 朴素 NCC 在 debug 模式下 500×400 区域约 78 秒，全屏更久。
@@ -408,8 +497,8 @@ region = { x = 1600, y = 900, w = 300, h = 150 }
 
 | 游戏 | 运行模式 | 适配要点 |
 |---|---|---|
-| **龙之谷**（PC 端游） | 固定**窗口模式** | 模板只针对静态 UI（按钮/图标/菜单）；WASD 移动用 `key_press`，UI 点击用 `click_image`；等待步骤设足 timeout |
-| **阴阳师**（手游·安卓模拟器） | 模拟器窗口 | 捕获目标是模拟器窗口（多开须指定标题）；点击类操作为主；随机弹窗频繁 → 用 `if_image` 关闭弹窗 |
+| **龙之谷**（PC 端游） | 固定**窗口模式** | 模板只针对静态 UI（按钮/图标/菜单）；WASD 移动用 `key_press`，UI 点击用 `click_image`；血量/等级/伤害等动态文本用 `ocr_text`；等待步骤设足 timeout |
+| **阴阳师**（手游·安卓模拟器） | 模拟器窗口 | 捕获目标是模拟器窗口（多开须指定标题）；点击类操作为主 → 文字按钮可直接 `click_text`；随机弹窗用 `if_image` 关闭、"胜利/失败"结算用 `assert_text`/`if_text` 判断 |
 
 模板资源按 `assets/<game>/` 分目录，命名 `界面_元素.png`（如 `dn_login_btn.png` / `yyj_garden.png`）。
 
@@ -420,7 +509,7 @@ region = { x = 1600, y = 900, w = 300, h = 150 }
 ```bash
 cargo test          # 运行单元测试（脚本解析 / 控制流编译 / 报告 / 按键映射）
 ```
-自带 26 个单元测试，覆盖：TOML 解析（含 `meta.verify_exact` 默认值与 `[[step]] verify_exact` 步骤级覆盖）、`repeat`/`if`/`else` 配对与跳转填充、未闭合报错、嵌套控制流、报告汇总与 HTML 转义、按键名解析与映射、失败对照图拼接、点击 jitter 随机偏移、金字塔加速匹配与精确匹配一致性/误报拒绝、fast→exact 确认路径与精确匹配一致、确认路径兜底不误报（另有 3 个 ignored：耗时基准×2、真实截图自匹配）。
+自带 39 个单元测试，覆盖：TOML 解析（含 `meta.verify_exact` 默认值与 `[[step]] verify_exact` 步骤级覆盖、`click_delay` 区间）、`repeat`/`if`/`else` 配对与跳转填充、`if_text` 与 `if_image` 共用条件分支编译、未闭合报错、嵌套控制流、报告汇总与 HTML 转义、按键名解析与映射、失败对照图拼接、点击 jitter 随机偏移、随机延时区间、金字塔加速匹配与精确匹配一致性/误报拒绝、fast→exact 确认路径与精确匹配一致、确认路径兜底不误报、OCR 模型加载与识别流程 smoke（另有 3 个 ignored：耗时基准×2、真实截图自匹配）。
 
 `scenarios/` 下还提供了可执行演示场景：
 - `demo.toml` — M2 冒烟（全链路）
@@ -438,13 +527,15 @@ auto-game/
 ├── src/
 │   ├── main.rs               # CLI 入口：run <场景> / template 模板采集
 │   ├── lib.rs                # 库入口（供二次开发）
-│   ├── adapter/              # 可插拔后端：capture / input / vision + Region
+│   ├── adapter/              # 可插拔后端：capture / input / vision / ocr + Region
 │   ├── action.rs             # 动作原语（截图/移动/点击/按键/找图）
-│   ├── engine.rs             # 流程引擎（编译指令 + 循环/分支 + failsafe）
+│   ├── engine.rs             # 流程引擎（编译指令 + 循环/分支 + failsafe + OCR 动作）
 │   ├── script.rs             # TOML 场景解析
 │   └── report.rs             # 文本 + HTML 报告
 ├── scenarios/                # 场景配置（演示/测试用例）
-└── assets/                   # 模板图像（按游戏分目录）
+├── assets/                   # 模板图像（按游戏分目录）+ ocr/（PP-OCRv4 模型）
+├── libs/                     # 运行时动态库（onnxruntime.dll，OCR 需要）
+└── vendor/                   # 本地 vendor 库（paddleocr_rs_onnx，含本地补丁）
 ```
 
 ---
@@ -462,6 +553,12 @@ auto-game/
 
 **Q：模板需要很精确吗？**
 模板即目标区域的原样截图即可（按钮/图标/静态 UI）。运行匹配用 `precision`（默认 0.85）容忍轻微差异；背景会动的区域请把模板裁小一点（只含静态部分），并配合 `region` 限定。
+
+**Q：血量、数值、标题这些动态文字读不了怎么办？**
+模板匹配读不了文字——用 OCR：`ocr_text` 识别区域文字并输出（带坐标与置信度），`if_text` 做文字条件分支，`click_text` 按文字点击，`assert_text` 等待文字出现。模型与运行时（`assets/ocr/` + `libs/`）已随仓库提供，运行前设 `$env:ORT_DYLIB_PATH = (Resolve-Path "libs\onnxruntime.dll").Path` 即可。
+
+**Q：OCR 会不会很慢？**
+模型**懒加载**（首次用到才加载，纯图像场景零开销）；识别用 `region` 收窄区域 + `--release` 构建可明显提速。PP-OCRv4 是轻量移动模型，单帧识别毫秒~百毫秒级，满足"逐步骤识别"而非"逐帧实时"的需求。
 
 **Q：游戏更新、UI 变了，模板匹配不上了怎么办？**
 这是预期内的正常情况，不会导致脚本乱点。失败步骤会自动保存现场截图与「新旧对照图」（`reports/<场景>/diff_step_*.png`，左=旧模板，右=现场），打开对照即可确认界面差异；再用 `template` 命令重新采集新模板。详见「失败自动存档」。
