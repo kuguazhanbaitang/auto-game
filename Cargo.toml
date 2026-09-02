@@ -15,6 +15,8 @@ enigo = "0.2"
 image = "0.25"
 # 模板匹配（纯 Rust 实现）
 imageproc = "0.25"
+# 数据并行（模板匹配加速：候选精匹配并行）
+rayon = "1"
 # 配置序列化
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
