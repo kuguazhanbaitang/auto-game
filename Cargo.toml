@@ -23,3 +23,5 @@ anyhow = "1"
 # 结构化日志
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# 键盘状态查询（failsafe 热键检测）
+device_query = "4.0"
