@@ -231,16 +231,18 @@ impl Engine {
         Ok(self.find_match(step)?.is_some())
     }
 
-    /// 在屏幕或指定区域内查找模板
+    /// 在屏幕或指定区域内查找模板。
+    /// 开关粒度：步骤显式声明 `verify_exact` 时覆盖 [meta] 全局值，否则回退全局。
     fn find_match(&self, step: &Step) -> Result<Option<Match>> {
         let template = self.load_template(step)?;
         let precision = req_precision(step);
+        let verify = step.verify_exact.unwrap_or(self.verify_exact);
         match step.region {
             Some(r) => {
                 self.actions
-                    .find_image_region(&template, precision, r, self.verify_exact)
+                    .find_image_region(&template, precision, r, verify)
             }
-            None => self.actions.find_image(&template, precision, self.verify_exact),
+            None => self.actions.find_image(&template, precision, verify),
         }
     }
 

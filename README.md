@@ -105,7 +105,7 @@ auto-game template [选项]   # 模板采集：截图生成模板 + 输出坐标
 [meta]
 name = "登录冒烟"        # 场景名（用于报告目录与展示）
 window = "MyGame"       # 可选：限定窗口标题（预留，xcap 窗口捕获）
-verify_exact = true     # 可选：模板匹配 fast→exact 精确确认（默认 false，见「区域匹配与性能」）
+verify_exact = true     # 可选：fast→exact 精确确认全局默认（false；可被步骤级覆盖）
 
 [[step]]
 action = "wait_image"   # 等待模板出现
@@ -117,6 +117,7 @@ timeout = 15
 action = "click_image"  # 找到模板并点击其中心
 image = "login_btn.png"
 precision = 0.9
+verify_exact = false    # 步骤级覆盖：此步关闭精确确认（其余步仍走全局 true）
 
 [[step]]
 action = "type_text"    # 输入文本
@@ -168,12 +169,13 @@ timeout = 20
 | `timeout` | 等待/断言类 | 超时秒数，默认 `15` |
 | `region` | 图像类 | 限定搜索区域 `{ x, y, w, h }`，**强烈建议指定**以提升性能 |
 | `jitter` | `click` / `click_image` | 点击随机抖动像素，每次点击在目标 ±N 内动态分布，默认 `0`（精确点击） |
+| `verify_exact` | 图像类 | 按步骤覆盖全局开关：显式 `true` / `false` 覆盖 `[meta] verify_exact`，缺省回退全局值 |
 
 **全局开关（`[meta]`）**：
 
 | 参数 | 说明 |
 |---|---|
-| `verify_exact` | 默认 `false`。设为 `true` 时，所有模板匹配走「fast 粗定位 → exact 精确确认」，返回像素级精确位置与准确置信度；金字塔漏检自动回退全图精确匹配兜底。见「区域匹配与性能」 |
+| `verify_exact` | 默认 `false`。设为 `true` 时，所有模板匹配走「fast 粗定位 → exact 精确确认」，返回像素级精确位置与准确置信度；金字塔漏检自动回退全图精确匹配兜底。某步骤可写 `[[step]] verify_exact = false` 单独关闭（见「通用参数」） |
 
 ### 控制流
 
@@ -310,6 +312,22 @@ jitter = 8
 
 **需要确切像素？开 `verify_exact`**：金字塔加速返回的位置精确到 ±1px、置信度为近似值，对绝大多数点击足够。若需求是"点击必须落在确切像素"（如精确像素断言、对极小 UI 区域点击），在 `[meta]` 设置 `verify_exact = true`，每个模板走「fast 粗定位 → 最终位置精确确认」：在模板 + 2×radius 邻域内做一次精确 NCC，抹掉降采样误差、给出准确置信度；金字塔漏检时自动回退全图精确匹配兜底（保证不漏检）。合成基准实测（debug，400×300 + 50×40 模板）：fast=142ms vs 确认后=166ms vs 全图精确=11.5s——确认几乎不增加开销（≈69 倍 vs 全图精确）。
 
+**粒度控制**：全局开启后，若个别步骤想走快路径，用步骤级覆盖单独关闭：
+```toml
+[meta]
+verify_exact = true      # 全局默认开启
+
+[[step]]
+action = "wait_image"    # 关键步骤：保持像素级精确
+image = "boss_hp.png"
+
+[[step]]
+action = "click_image"   # 高频点击：此步关闭确认，恢复 ~88x 快路径
+image = "attack_btn.png"
+verify_exact = false
+```
+未声明 `verify_exact` 的步骤自动回退全局值；步骤级显式声明优先于全局。
+
 **仍建议**：给图像类动作加 `region` 参数进一步收窄搜索范围：
 ```toml
 [[step]]
@@ -372,7 +390,7 @@ region = { x = 1600, y = 900, w = 300, h = 150 }
 ```bash
 cargo test          # 运行单元测试（脚本解析 / 控制流编译 / 报告 / 按键映射）
 ```
-自带 25 个单元测试，覆盖：TOML 解析（含 `meta.verify_exact` 默认值）、`repeat`/`if`/`else` 配对与跳转填充、未闭合报错、嵌套控制流、报告汇总与 HTML 转义、按键名解析与映射、失败对照图拼接、点击 jitter 随机偏移、金字塔加速匹配与精确匹配一致性/误报拒绝、fast→exact 确认路径与精确匹配一致、确认路径兜底不误报（另有 3 个 ignored：耗时基准×2、真实截图自匹配）。
+自带 26 个单元测试，覆盖：TOML 解析（含 `meta.verify_exact` 默认值与 `[[step]] verify_exact` 步骤级覆盖）、`repeat`/`if`/`else` 配对与跳转填充、未闭合报错、嵌套控制流、报告汇总与 HTML 转义、按键名解析与映射、失败对照图拼接、点击 jitter 随机偏移、金字塔加速匹配与精确匹配一致性/误报拒绝、fast→exact 确认路径与精确匹配一致、确认路径兜底不误报（另有 3 个 ignored：耗时基准×2、真实截图自匹配）。
 
 `scenarios/` 下还提供了可执行演示场景：
 - `demo.toml` — M2 冒烟（全链路）
@@ -407,7 +425,7 @@ auto-game/
 已内置加速：默认走图像金字塔 + 并行路径（合成基准实测 debug 约 88 倍加速）。仍建议给图像动作指定 `region` 收窄范围，并用 `--release` 构建运行。
 
 **Q：需要点击精确到某个像素，金字塔加速的 ±1px 够吗？**
-给 `[meta]` 加 `verify_exact = true`：每个模板在金字塔定位后再做一次精确确认，返回像素级精确位置与准确置信度；金字塔漏检会自动回退全图精确匹配兜底。实测仅比 fast 多 ~16% 开销（400×300 模板确认后约 166ms，而全图精确约 11.5s）。
+给 `[meta]` 加 `verify_exact = true`：每个模板在金字塔定位后再做一次精确确认，返回像素级精确位置与准确置信度；金字塔漏检会自动回退全图精确匹配兜底。实测仅比 fast 多 ~16% 开销（400×300 模板确认后约 166ms，而全图精确约 11.5s）。若只需个别关键步骤精确，可在 `[meta]` 全局开启后，对高频步骤写 `[[step]] verify_exact = false` 单独关掉确认（步骤级优先于全局）。
 
 **Q：怎么采集模板图像？还要自己截图裁剪吗？**
 不用。用内置 `template` 子命令：`auto-game template --name <模板> --x --y --w --h`（或 `--at-mouse` 以鼠标定位）。它用代码截图生成模板 PNG 到 `assets/`，并打印坐标与可直接粘贴的 TOML 片段。详见「模板采集」一节。
