@@ -33,7 +33,8 @@ pub struct Meta {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Step {
     /// 动作类型：screenshot / wait / move_mouse / click / key_press /
-    /// type_text / find_image / wait_image / click_image / assert_image
+    /// type_text / find_image / wait_image / click_image / assert_image /
+    /// ocr_text / if_text / click_text / assert_text
     pub action: String,
     /// 模板图像路径（相对 assets 目录）
     #[serde(default)]
@@ -59,7 +60,8 @@ pub struct Step {
     /// 点击随机延时下限（秒）：配合 click_delay 组成 [min, max] 区间；缺省 0
     #[serde(default)]
     pub click_delay_min: Option<f64>,
-    /// 输入文本
+    /// 输入文本（type_text 使用）；OCR 文字类动作（if_text / click_text /
+    /// assert_text）用作「期望包含的子串」匹配
     #[serde(default)]
     pub text: Option<String>,
     /// 按键名称（enter / escape / space）

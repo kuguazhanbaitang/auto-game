@@ -5,7 +5,7 @@
 //! - `if_image`（需 `image`）... [`else`] ... `end_if`：条件分支
 
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow, bail};
 use image::{Rgba, RgbaImage, imageops};
 
 use crate::action::Actions;
-use crate::adapter::{Key, Match, key_from_str};
+use crate::adapter::{Key, Match, OcrBackend, key_from_str};
 use crate::report::{Report, Status};
 use crate::script::{Scenario, Step};
 
@@ -84,6 +84,8 @@ pub struct Engine {
     failsafe: Failsafe,
     /// fast→exact 确认开关（来自场景 [meta] verify_exact）
     verify_exact: bool,
+    /// OCR 后端（懒加载：首次用到 OCR 动作时从 assets/ocr 加载模型）
+    ocr: Mutex<Option<Arc<OcrBackend>>>,
 }
 
 impl Engine {
@@ -99,6 +101,7 @@ impl Engine {
             reports_dir: PathBuf::from("reports").join(safe_name),
             failsafe: Failsafe::new(),
             verify_exact: false,
+            ocr: Mutex::new(None),
         }
     }
 
@@ -230,8 +233,12 @@ impl Engine {
         Ok(self.report.all_passed())
     }
 
-    /// 条件判断：模板是否出现（模板加载/匹配出错时返回 Err）
+    /// 条件判断：`if_image` 用模板匹配，`if_text` 用 OCR 文字包含匹配；
+    /// 模板加载/匹配出错时返回 Err
     fn if_image_hit(&self, step: &Step) -> Result<bool> {
+        if step.action == "if_text" {
+            return self.find_text_line(step).map(|l| l.is_some());
+        }
         Ok(self.find_match(step)?.is_some())
     }
 
@@ -278,6 +285,9 @@ impl Engine {
             "wait_image" => self.exec_wait_image(step),
             "click_image" => self.exec_click_image(step),
             "assert_image" => self.exec_assert_image(step),
+            "ocr_text" => self.exec_ocr_text(step),
+            "click_text" => self.exec_click_text(step),
+            "assert_text" => self.exec_assert_text(step),
             other => bail!("未知动作类型: {other}"),
         }
     }
@@ -415,6 +425,135 @@ impl Engine {
             bail!("assert_image 失败：{timeout:?} 内未找到目标图像");
         }
         Ok(format!("断言通过：模板存在（precision={}）", req_precision(step)))
+    }
+
+    // ---- OCR 文字识别类动作（与模板匹配互补，识别 UI 文案/动态文本）----
+
+    /// 懒加载 OCR 后端：首次用到时从 assets/ocr 加载 PP-OCRv4 模型。
+    /// 返回 Arc 克隆，避免跨线程借用。
+    fn ensure_ocr(&self) -> Result<Arc<OcrBackend>> {
+        let mut guard = self.ocr.lock().unwrap();
+        if guard.is_none() {
+            let model_dir = self.assets_dir.join("ocr");
+            tracing::info!("首次使用 OCR：加载模型 {}", model_dir.display());
+            *guard = Some(Arc::new(OcrBackend::load(&model_dir)?));
+        }
+        Ok(guard.as_ref().unwrap().clone())
+    }
+
+    /// 屏幕截图 + OCR 识别（region 限定识别区域，None 全屏）。
+    fn ocr_screen(&self, step: &Step) -> Result<Vec<crate::adapter::OcrLine>> {
+        let backend = self.ensure_ocr()?;
+        let img = self.actions.snapshot()?;
+        backend.recognize_region(&img, step.region)
+    }
+
+    /// 在 OCR 结果中查找包含指定文本的行（子串匹配，取置信度最高者）。
+    fn find_text_line(&self, step: &Step) -> Result<Option<crate::adapter::OcrLine>> {
+        let text = step
+            .text
+            .as_deref()
+            .ok_or_else(|| anyhow!("动作 {} 缺少 text 参数", step.action))?;
+        let lines = self.ocr_screen(step)?;
+        Ok(lines
+            .into_iter()
+            .filter(|l| l.text.contains(text))
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal)))
+    }
+
+    fn exec_ocr_text(&self, step: &Step) -> Result<String> {
+        let lines = self.ocr_screen(step)?;
+        if lines.is_empty() {
+            return Ok("未识别到文本".to_string());
+        }
+        // 最多展示前 20 行，避免报告过长；超出的行数单独提示
+        let shown: Vec<String> = lines
+            .iter()
+            .take(20)
+            .map(|l| {
+                format!(
+                    "{}[{}x{} @({},{}) 置信度{:.0}%]",
+                    l.text,
+                    l.w,
+                    l.h,
+                    l.x,
+                    l.y,
+                    l.confidence * 100.0
+                )
+            })
+            .collect();
+        let more = if lines.len() > 20 {
+            format!("\n  … 共识别 {} 行，其余省略", lines.len())
+        } else {
+            String::new()
+        };
+        Ok(format!("识别到 {} 行文本：\n  {}", lines.len(), shown.join("\n  ")) + &more)
+    }
+
+    fn exec_click_text(&self, step: &Step) -> Result<String> {
+        let line = self.find_text_line(step)?.ok_or_else(|| {
+            anyhow!(
+                "click_text 失败：未识别到包含 {:?} 的文本",
+                step.text.as_deref().unwrap_or("")
+            )
+        })?;
+        let (bx, by) = line.center();
+        let (cx, cy) = if let Some(j) = step.jitter {
+            let (dx, dy) = jitter_offset(j);
+            // 限制在文字行范围内，避免点出目标元素
+            let half_w = line.w as i32 / 2;
+            let half_h = line.h as i32 / 2;
+            (
+                (bx + dx).clamp(bx - half_w, bx + half_w),
+                (by + dy).clamp(by - half_h, by + half_h),
+            )
+        } else {
+            (bx, by)
+        };
+        self.actions.move_mouse(cx, cy)?;
+        let delay = random_click_delay(step);
+        if delay > 0.0 {
+            std::thread::sleep(Duration::from_secs_f64(delay));
+        }
+        self.actions.click()?;
+        if cx != bx || cy != by {
+            Ok(format!(
+                "点击文本 {:?} 中心附近 ({cx}, {cy})（基座 ({bx}, {by})，jitter={}，延时 {delay:.3}s），置信度 {:.3}",
+                line.text,
+                step.jitter.unwrap_or(0),
+                line.confidence
+            ))
+        } else if delay > 0.0 {
+            Ok(format!(
+                "点击文本 {:?} 中心 ({cx}, {cy})（点击前随机延时 {delay:.3}s），置信度 {:.3}",
+                line.text, line.confidence
+            ))
+        } else {
+            Ok(format!(
+                "点击文本 {:?} 中心 ({cx}, {cy})，置信度 {:.3}",
+                line.text, line.confidence
+            ))
+        }
+    }
+
+    fn exec_assert_text(&self, step: &Step) -> Result<String> {
+        let timeout = req_timeout(step);
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(l) = self.find_text_line(step)? {
+                return Ok(format!(
+                    "断言通过：识别到文本 {:?}（置信度 {:.3}）",
+                    l.text, l.confidence
+                ));
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "assert_text 失败：{timeout:?} 内未识别到包含 {:?} 的文本",
+                    step.text.as_deref().unwrap_or("")
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     // ---- 辅助 ----
@@ -569,7 +708,7 @@ fn compile(steps: &[Step]) -> Result<Vec<Instr>> {
                 }
                 instrs.push(Instr { step: step.clone(), kind: Kind::EndRepeat { back: repeat_idx } });
             }
-            "if_image" => {
+            "if_image" | "if_text" => {
                 let idx = instrs.len();
                 instrs.push(Instr {
                     step: step.clone(),
@@ -707,6 +846,21 @@ mod tests {
         match kind_of(&instrs[2]) {
             Kind::Else { end } => assert_eq!(*end, 4),
             _ => panic!("else 应为 Else"),
+        }
+    }
+
+    #[test]
+    fn compile_if_text_uses_same_branch_as_if_image() {
+        // if_text 与 if_image 共用条件分支编译（跳转填充逻辑一致）
+        let steps = vec![step("if_text"), step("click"), step("end_if")];
+        let instrs = compile(&steps).unwrap();
+        assert_eq!(instrs.len(), 3);
+        match kind_of(&instrs[0]) {
+            Kind::IfImage { else_or_end, end } => {
+                assert_eq!(*else_or_end, 2);
+                assert_eq!(*end, 2);
+            }
+            _ => panic!("if_text 应编译为条件分支"),
         }
     }
 

@@ -7,10 +7,12 @@ use serde::Deserialize;
 
 pub mod capture;
 pub mod input;
+pub mod ocr;
 pub mod vision;
 
 pub use capture::{CaptureBackend, CaptureTrait, WindowShot};
 pub use input::{InputBackend, InputTrait, Key, key_from_str};
+pub use ocr::{OcrBackend, OcrLine, OcrTrait};
 pub use vision::{Match, VisionBackend, VisionTrait};
 
 /// 屏幕区域（左上角坐标 + 宽高），用于限定模板匹配搜索范围
