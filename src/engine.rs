@@ -776,6 +776,12 @@ fn req_timeout(step: &Step) -> Duration {
     Duration::from_secs_f64(step.timeout.unwrap_or(15.0))
 }
 
+/// 仅检查控制流结构是否配对（供 `validate` 子命令复用；不带病执行）。
+/// 覆盖：repeat/end_repeat、if_image/if_text/else/end_if 的闭合与匹配。
+pub fn check_control_flow(steps: &[Step]) -> Result<()> {
+    compile(steps).map(|_| ())
+}
+
 /// 供外部使用的场景运行入口
 pub fn run_scenario(scenario_path: &Path, assets_dir: PathBuf) -> Result<bool> {
     let scenario = Scenario::load(scenario_path)?;

@@ -8,3 +8,4 @@ pub mod engine;
 pub mod gui;
 pub mod report;
 pub mod script;
+pub mod validate;

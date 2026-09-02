@@ -4,6 +4,7 @@
 //!   auto-game run <场景.toml> [--assets <资源目录>]
 //!   auto-game template [选项]   # 模板采集：截图存 assets + 输出坐标/TOML 片段
 //!   auto-game gui [--assets <资源目录>]   # GUI 录制器：可视化编排场景
+//!   auto-game validate <场景.toml> [--assets <资源目录>]   # 场景静态校验
 
 use std::path::PathBuf;
 
@@ -21,9 +22,53 @@ fn main() -> Result<()> {
         "run" => cmd_run(&args[2..]),
         "template" => cmd_template(&args[2..]),
         "gui" => cmd_gui(&args[2..]),
+        "validate" => cmd_validate(&args[2..]),
         _ => bail!(
-            "用法:\n  auto-game run <场景.toml> [--assets <资源目录>]\n  auto-game template [选项]  # 模板采集\n  auto-game gui [--assets <资源目录>]  # GUI 录制器"
+            "用法:\n  auto-game run <场景.toml> [--assets <资源目录>]\n  auto-game template [选项]  # 模板采集\n  auto-game gui [--assets <资源目录>]  # GUI 录制器\n  auto-game validate <场景.toml> [--assets <资源目录>]  # 场景静态校验"
         ),
+    }
+}
+
+// ---------------- validate：场景静态校验 ----------------
+
+fn cmd_validate(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        bail!("用法: auto-game validate <场景.toml> [--assets <资源目录>]");
+    }
+    let scenario_path = PathBuf::from(&args[0]);
+    let mut assets_dir = PathBuf::from("assets");
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--assets" if i + 1 < args.len() => {
+                assets_dir = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let result = auto_game::validate::validate_scenario(&scenario_path, &assets_dir)?;
+    println!("校验场景: {}", scenario_path.display());
+    if result.issues.is_empty() {
+        println!("✅ 通过：未发现问题");
+        return Ok(());
+    }
+    for issue in &result.issues {
+        let loc = match issue.step {
+            Some(n) => format!("步骤 #{n}"),
+            None => "场景".to_string(),
+        };
+        println!("[{}] {loc}: {}", issue.level.label(), issue.message);
+    }
+    let errs = result.errors();
+    let warns = result.warnings();
+    if errs > 0 {
+        println!("❌ 校验未通过：{} 个错误、{} 个警告（退出码 1）", errs, warns);
+        std::process::exit(1);
+    } else {
+        println!("⚠️  校验通过，但 {} 个警告（可运行，建议检查）", warns);
+        Ok(())
     }
 }
 
