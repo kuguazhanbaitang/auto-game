@@ -13,11 +13,12 @@
 | 输入模拟 | enigo / rustautogui / autocontrol | **enigo**（抽象）+ **rustautogui**（内置） | enigo 跨平台、被 RustDesk 生产验证，trait 抽象便于替换 |
 | 模板匹配找图 | imageproc / rustautogui（Segmented NCC / FFT）/ template-matching(GPU) / opencv | **imageproc**（已实现） | `template_matching`（CrossCorrelationNormalized）+ `find_extremes`，纯 Rust 无重依赖；rustautogui 保留在 Cargo.toml 作备选/预留 |
 | 紧急停止（failsafe）键盘监听 | device_query | **device_query** | 轮询 `F9` 键状态，不可用时降级禁用 |
+| 并行加速 | rayon | **rayon** | 金字塔候选精匹配用 `par_iter` 并行 |
 | OCR（可选，预留） | tesseract-rs / ddddocr | 预留接口 | 按需接入，不进 MVP |
 | 配置 | serde + TOML | **serde + toml** | Rust 标准做法 |
 | 日志 / 报告 | tracing | **tracing** | 结构化、分层过滤 |
 
-> 依赖选型结论（按已落地实现）：**xcap** 负责截图（全屏/区域），**enigo** 负责键鼠输入，**imageproc** 负责模板匹配（NCC），**device_query** 负责 F9 failsafe 键盘监听，**serde+toml** 负责配置。rustautogui 保留在依赖中以备后续换用其分段/FFT 匹配。上层价值在「脚本引擎 + 报告 + 模板采集」，这是目前开源空白。
+> 依赖选型结论（按已落地实现）：**xcap** 负责截图（全屏/区域），**enigo** 负责键鼠输入，**imageproc** 负责模板匹配（NCC），**device_query** 负责 F9 failsafe 键盘监听，**rayon** 负责匹配候选并行，**serde+toml** 负责配置。rustautogui 保留在依赖中以备后续换用其分段/FFT 匹配。上层价值在「脚本引擎 + 报告 + 模板采集 + 匹配加速」，这是目前开源空白。
 
 ---
 
@@ -37,7 +38,7 @@
 │ Adapter Layer  可插拔后端                          │
 │  capture(xcap) / input(enigo) / vision(imageproc) │
 ├───────────────────────────────────────────────────┤
-│ 核心库  xcap · enigo · imageproc · device_query    │
+│ 核心库  xcap · enigo · imageproc · device_query · rayon │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -58,7 +59,7 @@ src/
 │   ├── mod.rs       # Region 结构 + Key 枚举导出 + 适配层汇总
 │   ├── capture.rs   # 截图后端：xcap 实现（全屏/区域截图）
 │   ├── input.rs     # 输入后端：enigo 实现 + Key 全量枚举 / key_from_str / key_combo
-│   └── vision.rs    # 识别后端：imageproc 模板匹配（NCC）+ Match 结构
+│   └── vision.rs    # 识别后端：imageproc 模板匹配（NCC）+ Match + 金字塔/并行加速
 ├── action.rs        # 动作原语：Actions 结构体（截图/移动/点击/按键/找图/区域截图）
 ├── engine.rs        # 流程引擎：指令编译（循环/分支）、执行、failsafe、失败自动存档
 ├── script.rs        # TOML 解析 → 动作序列（serde deserialize；Step 含 region/jitter）
@@ -102,7 +103,7 @@ Key 枚举 + key_from_str(&str)  // 全量游戏键位，大小写/别名兼容�
 # 场景：登录主菜单并验证
 [meta]
 name = "登录主菜单冒烟"
-window = "MyGame"          # 可选：限定窗口（xcap 捕获，预留）
+window = "MyGame"          # 可选：限定窗口（xcap 捕获）
 
 [[step]]
 action = "wait_image"
@@ -201,7 +202,8 @@ action = "end_repeat"
 5. **失败自动存档（证据链）**：任一步骤 FAIL 自动保存现场截图（有 `region` 截区域、否则全屏 `fail_step_<n>.png`）；若该步带模板，再生成「左=旧模板 / 右=现场」对照图 `diff_step_<n>.png`，UI 变更一目了然；路径写入报告详情；
 6. **结果报告**：文本报告（控制台）+ HTML 报告（`reports/<场景名>/index.html`，状态着色、耗时统计、HTML 转义防注入）；
 7. **拟人化点击（jitter）**：零依赖 xorshift64* 随机源（启动时按时间播种），`click` / `click_image` 坐标在 ±N 内随机分布；`click_image` 偏移自动限制在模板范围内避免点出元素；报告显示实际点击坐标与基座、偏移量；
-8. **模板采集（template 子命令）**：用代码截图生成模板 PNG 到 `assets/`，同时打印坐标与可直接粘贴的 TOML 片段（`image` + `region`），「截图→模板→坐标→场景片段」闭环，无需手工截图裁图。
+8. **模板采集（template 子命令）**：用代码截图生成模板 PNG 到 `assets/`，同时打印坐标与可直接粘贴的 TOML 片段（`image` + `region`），「截图→模板→坐标→场景片段」闭环，无需手工截图裁图；
+9. **模板匹配加速（金字塔 + 并行）**：图像金字塔粗到细——先在低分辨率全图粗定位 top-K 候选，再逐层在候选邻域（窗口 = 模板尺寸 + 2×radius）并行精匹配，把「全屏大匹配」变为「若干小窗口匹配」；语义不变（仍返回全局最高置信度位置）。合成基准实测 debug 下 400×300 + 50×40 模板：**~14s → ~0.16s（≈88x）**；小图/小模板（<128px 或模板 <16px）自动回退精确匹配。
 
 ---
 
@@ -213,8 +215,8 @@ action = "end_repeat"
 | **M1 原语** | Vision trait 落地模板匹配，实现 click_image / wait_image / assert_image | 可对一个游戏完成「找图→点击→验证」手写调用 |
 | **M2 引擎** | TOML 脚本解析 + 流程引擎 + 报告 | 纯配置文件能跑通一个冒烟场景 |
 | **M3 增强** | ✅ 条件分支/循环、✅ HTML 报告 | 覆盖多场景，报告可读（HTML 已可读） |
-| **打磨轮** | ✅ key_combo 全量按键、✅ region 区域限定匹配、✅ F9 failsafe、✅ template 模板采集子命令、✅ 失败自动存档+新旧对照图、✅ jitter 拟人化点击 | 20 个单测全绿，实跑闭环验证 |
-| **M4 候选** | 模板匹配加速（金字塔/多线程/换算法）、窗口级捕获（capture_window + 坐标映射）、点击随机延时、OCR 接入（tesseract-rs / ddddocr）、GUI 录制器（egui）、场景静态校验、GitHub Actions CI + 打包 | 按用户优先级推进 |
+| **打磨轮** | ✅ key_combo 全量按键、✅ region 区域限定匹配、✅ F9 failsafe、✅ template 模板采集子命令、✅ 失败自动存档+新旧对照图、✅ jitter 拟人化点击、✅ 模板匹配加速（金字塔+并行，实测 ~88x） | 22 个单测全绿（另 2 个 ignored 基准/真实截图），实跑闭环验证 |
+| **M4 候选** | 窗口级捕获（capture_window + 坐标映射）、点击随机延时、OCR 接入（tesseract-rs / ddddocr）、GUI 录制器（egui）、场景静态校验、GitHub Actions CI + 打包 | 按用户优先级推进 |
 
 ---
 
@@ -223,7 +225,7 @@ action = "end_repeat"
 | 风险 | 对策 |
 |---|---|
 | 模板匹配对分辨率/画质敏感 | 限定窗口/区域、多分辨率模板、可调 precision 容差 |
-| 模板匹配计算量大（M1 实测：imageproc 朴素算法，500×400 区域 debug 约 78s，全屏更久） | 限定搜索区域（capture_region）、优先 release 模式运行、后续可换 rustautogui 分段匹配或 FFT 加速 |
+| 模板匹配计算量大（M1 实测：imageproc 朴素算法，500×400 区域 debug 约 78s，全屏更久） | **已实现**图像金字塔 + Rayon 并行加速（合成基准 debug 400×300 约 14s→0.16s，≈88x）；配合 `region` 限定 + `--release` 效果最佳 |
 | 窗口被遮挡截不到 | xcap 窗口捕获；必要时升级 Desktop Duplication |
 | 反作弊封号 | 坚持纯视觉方案，明确不做内存读取/注入 |
 | 杀软拦截输入模拟 | 文档说明白名单/签名建议；失败提示清晰 |
