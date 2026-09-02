@@ -20,6 +20,7 @@
 - **拟人化点击**：点击动作支持 `jitter` 随机抖动——每次点击位置在目标周围动态分布，不总点同一个像素，更接近真人操作
 - **OCR 文字识别**：`ocr_text` / `if_text` / `click_text` / `assert_text`——识别游戏界面文字（血量/数值/标题/弹窗文案），与模板匹配互补（模板回答"某图在不在/在哪"，OCR 回答"这里写了什么"）
 - **组合键**：`key_combo` 支持 Ctrl+A 等组合键；按键覆盖游戏常用键位（WASD/数字/F1-F12/方向/修饰键）
+- **GUI 录制器**：`gui` 子命令打开桌面界面——实时画面预览、录制手动点击/按键自动生成步骤、框选即存模板、步骤可视化编辑、一键导出 TOML 并复用引擎运行（录制自动生成 `click`/`key_press`，坐标点击可一键转 `click_image` 模板）
 - **报告**：文本报告 + HTML 报告（状态着色、耗时统计、注入转义）
 - **可插拔后端**：截图 / 输入 / 识别 / OCR 全部封装在 trait 之后，可替换底层库（xcap / enigo / rustautogui / paddleocr_rs_onnx）
 
@@ -75,6 +76,7 @@ cargo run -- template --name attack_btn --at-mouse --center --w 80 --h 80
 ```
 auto-game run <场景.toml> [--assets <资源目录>]
 auto-game template [选项]   # 模板采集：截图生成模板 + 输出坐标/TOML 片段
+auto-game gui [--assets <资源目录>]   # GUI 录制器：可视化录制/预览/编辑/运行
 ```
 
 | 命令 | 说明 |
@@ -82,6 +84,7 @@ auto-game template [选项]   # 模板采集：截图生成模板 + 输出坐标
 | `run <场景.toml>` | 执行场景文件（必填） |
 | `run --assets <目录>` | 模板图像根目录，默认 `assets/` |
 | `template` | 模板采集子命令，见下方「模板采集」 |
+| `gui` | 打开 GUI 录制器（可视化录制点击/按键、框选模板、编辑步骤、导出并运行），见「GUI 录制器」 |
 
 ### `template` 采集参数
 
@@ -95,6 +98,34 @@ auto-game template [选项]   # 模板采集：截图生成模板 + 输出坐标
 | `--center` | 配合 `--at-mouse`：以鼠标位置为中心截取 |
 | `--full` | 全屏截图（用于定位元素坐标） |
 | `--preview` | 额外保存一张全屏预览到 `reports/`，便于确认坐标 |
+
+---
+
+## 🎮 GUI 录制器（egui）
+
+可视化编排场景：手动操作游戏录一遍 → 自动生成步骤 → 预览/编辑 → 导出 TOML → 复用引擎运行。
+
+```
+auto-game gui            # 启动（默认 assets/）
+auto-game gui --assets D:\my-assets
+```
+
+### 基本流程
+
+1. **启动**：运行 `auto-game gui`，窗口左侧为步骤编辑区，中央为画面预览。
+2. **画面**：点「刷新」看全屏预览；勾选「窗口模式」并填窗口标题关键字（如 `龙之谷` / `MuMu`），按游戏窗口捕获（同 `[meta] window` 逻辑）。
+3. **录制**：点「⏺ 开始录制」，把焦点切到游戏窗口手动操作——左键点击生成 `click` 步骤、按键生成 `key_press` 步骤（实时追加在左侧列表）。录完点「⏹ 停止录制」。
+4. **框选模板**：在预览图上拖动框选 UI 元素 → 上方显示真实像素坐标/尺寸 → 「保存模板」存到 `assets/<name>.png`；或「插入 region」生成带区域的等待步骤。
+5. **坐标点击转模板**：选中某条 `click` 步骤点「→模板」，自动以该坐标为中心截 64×64 模板并转为 `click_image`（保留 jitter/click_delay 拟人化参数）——比纯坐标点击更抗 UI 微移。
+6. **编辑**：每步可改动作（14 种）与参数（x/y/jitter/precision/timeout/image/text/key/region…），支持上移/下移/删除/清空，随时插入 `wait` / `screenshot` 步骤。
+7. **导出**：填「场景名」→「💾 导出 TOML」，生成 `scenarios/<场景名>.toml`（与手写场景完全等价，可直接 `auto-game run` 运行）。
+8. **运行**：点「▶ 运行场景」后台复用引擎执行，结果回状态栏；运行中引擎接管鼠标键盘，**F9 可中止**。
+
+### 注意事项
+
+- 录制期间请把焦点放在**游戏窗口**上操作；在 GUI 窗口里按字母/数字键会被当作录制输入（白名单外的 F13+、小键盘、标点不录）。
+- 预览/录制与引擎运行约束相同：需要真实桌面会话与前台窗口。
+- 若场景用到 OCR 动作，运行前需 `$env:ORT_DYLIB_PATH = (Resolve-Path "libs\onnxruntime.dll").Path`（与 CLI 一致）。
 
 ---
 
@@ -525,8 +556,9 @@ auto-game/
 ├── README.md                 # 本文件
 ├── docs/design.md            # 设计文档（架构/选型/游戏适配）
 ├── src/
-│   ├── main.rs               # CLI 入口：run <场景> / template 模板采集
+│   ├── main.rs               # CLI 入口：run <场景> / template 模板采集 / gui 录制器
 │   ├── lib.rs                # 库入口（供二次开发）
+│   ├── gui.rs                # GUI 录制器（egui/eframe 桌面界面）
 │   ├── adapter/              # 可插拔后端：capture / input / vision / ocr + Region
 │   ├── action.rs             # 动作原语（截图/移动/点击/按键/找图）
 │   ├── engine.rs             # 流程引擎（编译指令 + 循环/分支 + failsafe + OCR 动作）

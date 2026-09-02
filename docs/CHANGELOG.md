@@ -247,6 +247,53 @@
 
 **验证**：中文测试图（600×140 微软雅黑渲染"龙之谷 阴阳师 12345 / 进入副本 开始游戏"）实识别 2 行全部命中、置信度 1.0；白图 smoke 1.11s 无异常；`cargo test -j 1` 39 passed + 3 ignored。
 
+### M4 后续③：egui GUI 录制器（2026-09-02，本地未推送）
+
+#### 需求与取舍
+
+用户从三个候选功能（GUI 录制器 / `validate` 子命令 / GitHub Actions CI+打包）中明确选择**「优先完成 egui」**。目标：可视化录制手动点击/按键 → 自动生成场景 TOML，把「手写 TOML + 量坐标 + 手工截图」变成「录一遍就有」，并复用既有引擎运行。
+
+| 候选 | 定位 | 成本 | 结论 |
+|---|---|---|---|
+| GUI 录制器（egui） | 录制 + 预览 + 编辑 + 导出 + 运行 | 最大（全新桌面应用） | ✅ 用户选定 |
+| `validate` 子命令 | 运行前静态检查（TOML/动作/参数/模板/控制流闭合） | 最小 | 后续 |
+| GitHub Actions CI+打包 | 云端自动测试 + 发布 exe | 中（不受本机 443 影响） | 后续 |
+
+#### 依赖选型决策
+
+| 决策 | 内容 | 原因 |
+|---|---|---|
+| GUI 框架 | **eframe 0.35**（egui 官方桌面后端） | Rust 生态最成熟的即时模式（immediate mode）GUI，纯 Rust、无额外 UI 框架；用户此前用 eframe/egui 开发过 `music_studio` 桌面应用，技术栈熟悉 |
+| 全局输入捕获 | **复用 device_query 4.0.1**（与引擎 failsafe 同源） | 零新增依赖；`get_mouse().button_pressed[1]`（1-based 左键）+ `get_keys()` 轮询即可捕获全局点击/按键 |
+| 渲染后端 | **glow（OpenGL），显式禁用默认 wgpu** | eframe 0.35 **默认 features 含 wgpu**，其 `wgpu-hal` 的 D3D12 代码与 xcap/enigo 引入的 `windows` crate 版本冲突（`ResourceCategory: From<&D3D12_RESOURCE_DESC>` 等 10 个 E0277）→ 编译失败；改 `default-features=false + features=["glow","default_fonts","accesskit"]` 后编译通过 |
+| 序列化 | **手写 TOML 导出，不给 Step 加 Serialize** | `script.rs` 的 Step 仅 Deserialize（TOML 只读）；为避免为核心数据结构引入 Serialize 派生污染，GUI 侧按字段手写 TOML 文本 |
+
+#### eframe 0.35 重大 API 适配（与 0.34 不兼容）
+
+| 0.34 旧 API | 0.35 新 API | 影响 |
+|---|---|---|
+| `fn update(&mut self, ctx: &Context, frame)` | **`fn ui(&mut self, ui: &mut egui::Ui, frame)`**（App trait 主入口；另可选 `fn logic(ctx, frame)` 跑后台逻辑） | 主循环入口变更 |
+| `egui::SidePanel::left(id).show(ctx,…)` / `TopBottomPanel::top(id)` | 统一 **`egui::Panel::left/top(id).show(ui,…)`**（接收 `&mut Ui` 而非 `Context`） | 面板系统重构 |
+| `egui::CentralPanel::default().show(ctx,…)` | `CentralPanel::default().show(ui,…)` | 接收 `&mut Ui` |
+| `egui::SidePanel::width_range(..)` | `Panel` 无该方法 | 移除，仅 `resizable` |
+| `Keycode` 枚举 `A..=Z` 范围匹配 | 枚举**不支持 range pattern**（E0029）→ 显式列 26 字母 + 10 数字 + F1-12 + 控制键 | 录制键映射重写 |
+
+#### 功能实现
+
+- `src/gui.rs`：`GuiApp`（实现 `eframe::App`）+ `run_gui(assets_dir)`；`main.rs` 新增 `gui` 子命令；`lib.rs` 注册 `pub mod gui`。
+- **录制线程** `spawn_recorder`：device_query 8ms 轮询，检测左键「按下沿」→ 点击事件、按键「出现边沿」→ 按键事件，经 `mpsc::channel` 回 GUI；按住键用 `Vec<Keycode>` 集合差集判定，支持 ctrl 等组合键防重复。
+- **画面预览**：复用 `CaptureBackend.capture_full()` / `capture_window(窗口标题关键字)`，截图转 `egui::ColorImage` 纹理实时显示；录制中 150ms / 空闲 500ms 刷新，避免过度占用。
+- **框选模板**：预览图上拖拽 → 实时显示像素坐标/尺寸 → 「保存模板」存 `assets/<name>.png`（复用 `capture_region` 按显示比例换算回真实像素）或「插入 region」生成带 region 的 `wait_image` 步骤。
+- **步骤编辑**：左侧列表，每步可改 action（14 种）/ 参数（x/y/jitter/precision/timeout/image/text/key/keys/region…）；上移/下移/删除/清空；「→模板」把坐标 `click` 以点击坐标为中心截 64×64 模板并转 `click_image`（保留 jitter/click_delay 拟人化参数）。
+- **导出**：手写 TOML → `scenarios/<name>.toml`；**运行**：后台线程调 `engine::run_scenario` 复用既有引擎，结果经 channel 回状态栏，运行中可 F9 中止。
+- **忽略录制干扰**：录制线程只录左键与字母/数字/F1-12/控制键；小键盘、F13+、标点不录（避免误录 GUI 自身操作）。
+
+#### 验证
+
+- `cargo build -j 1` 通过、无 warning；
+- `cargo test -j 1` = **39 passed + 3 ignored**（既有功能回归无影响）；
+- 实际启动 `auto-game gui`，进程正常存活 7s 未崩溃（无 panic 输出）。
+
 ---
 
 ## 四、关键技术机制复盘（深入原理）
@@ -326,6 +373,16 @@
 | OCR rec 模型全动态 shape 导致识别全空 | 上游 `(-1).max(1)=1` 把高度算成 1 | vendor patch：动态维度回退 PP-OCRv4 标准高度 48 |
 | OCR 运行时缺 onnxruntime.dll | Windows 无全局 ONNX Runtime | 随仓库提供 `libs/`，设 `ORT_DYLIB_PATH` 指向 dll |
 
+### 4.9 egui 录制器机制复盘
+
+**录制事件模型**：device_query 是「状态轮询」不是「事件回调」→ 用**边沿检测**模拟事件：`button_pressed[1]` 从 false→true 记一次点击（按下沿），按键从「不在按住集合」→「在」记一次按键；按住集合用 `Vec<Keycode>` 差集维护，天然防抖、支持组合键。
+
+**为什么预览截图用 `CaptureBackend` 而非 egui 内置**：引擎截图链路（xcap）与运行态完全一致，所见即所得——预览里框的 region 就是引擎实际匹配的区域，避免「预览与实际不一致」。
+
+**为什么 eframe 默认 wgpu 必须换 glow**：eframe 0.35 默认 features 新增 `wgpu`，而 wgpu 29 的 `wgpu-hal` 依赖的 `windows` crate 与 xcap/enigo/device_query 已锁定的版本在 D3D12 接口生成上冲突（同一 `ID3D12Heap` 的 `Param` trait 在不同 windows crate 版本下不满足）→ 编译期 10 个 E0277。glow（OpenGL）后端无此冲突，且 0.35 的 glow 仍是完整渲染后端，功能等价。
+
+**为什么 GUI 导出用「手写 TOML」而非「给 Step 加 Serialize」**：Step 是引擎核心只读结构（仅 Deserialize），为其加 Serialize 会扩大序列化契约面、且 `Option` 字段的默认值语义在导出时需要过滤（None 不输出）——手写序列化函数 40 行内可控，且不触碰核心结构。
+
 ---
 
 ## 五、数据与验证记录
@@ -390,7 +447,7 @@
 1. ~~窗口级捕获 + 坐标映射~~ ✅ 已做
 2. ~~点击随机延时~~ ✅ 已做
 3. ~~OCR 接入~~ ✅ 已做（paddleocr_rs_onnx + PP-OCRv4）
-4. **GUI 录制器（egui）**——可视化编排场景、录制点击序列，进一步降低上手门槛。
+4. ~~GUI 录制器（egui）~~ ✅ 已做（M4 后续③）——可视化编排场景、录制点击序列、画面预览、步骤编辑、导出并复用引擎运行。
 5. **场景静态校验（validate 子命令）**——不实际跑场景就能检查 TOML 语法 / 模板存在 / 控制流闭合 / OCR 模型存在。
 6. **GitHub Actions CI + 打包**——持续集成与发布产物。
 

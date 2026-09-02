@@ -313,3 +313,60 @@ action = "end_repeat"
 - 首次适配某游戏时，用 `template` 子命令（`--at-mouse` / `--x --y` / `--full`）直接采集真实界面模板到 `assets/<game>/`，命令同时输出坐标与可直接粘贴的场景片段，无需手工截图裁图；
 - **OCR 与模板匹配互补使用**：模板定位静态 UI（按钮/图标），OCR 读动态文字（血量/数值/文案）。OCR 模型与运行时随仓库提供（`assets/ocr/` + `libs/`），无需手工下载，运行时设 `ORT_DYLIB_PATH` 指向 `libs/onnxruntime.dll`；
 - 两游戏均为运营中网游，仅用于**个人合法自动化测试与研究**，遵守各游戏服务条款，不用于挂机牟利或违反规则的行为。
+
+## 11. GUI 录制器（egui）
+
+> 里程碑：M4 后续③。目标是把「手写 TOML + 量坐标 + 手工截图」的编排过程可视化，**录一遍就有**：手动操作游戏 → 自动生成场景步骤 → 预览/编辑 → 导出 → 复用引擎运行。
+
+### 11.1 架构与模块
+
+```
+┌────────────────────────── auto-game gui（桌面窗口） ──────────────────────────┐
+│  顶部工具条：录制开关 / 窗口模式 / 场景名 / 导出 / 运行                         │
+│  ┌──────────── 左侧：步骤编辑 ────────────┐  ┌──── 中央：画面预览 ──────┐      │
+│  │  步骤列表（action/参数/上移下移/删除）  │  │  实时截图（全屏/窗口）   │      │
+│  │  每个图像步骤可调 region / precision    │  │  鼠标框选→坐标/尺寸     │      │
+│  │  「→模板」把坐标点击转 click_image      │  │  →保存模板 / 插入region │      │
+│  └────────────────────────────────────────┘  └──────────────────────────┘      │
+└───────────────────────────────────────────────────────────────────────────────┘
+   录制线程（后台）：device_query 轮询 → 点击/按键事件 → mpsc channel → 追加步骤
+   运行（后台）：导出 TOML → engine::run_scenario → 结果回状态栏（F9 中止）
+```
+
+### 11.2 录制机制（事件模型）
+
+- 复用引擎 failsafe 同源的 **device_query** 轮询（8ms 间隔），不做全局钩子，避免引入依赖与权限问题。
+- **点击**：`get_mouse().button_pressed[1]`（1-based 左键）false→true 的**按下沿**记一次 `click`。
+- **按键**：`get_keys()` 返回按住键集合，与上一帧集合做差集，新增键记一次 `key_press`（防抖 + 支持组合键按住不重复记）。
+- 录制范围白名单：字母 / 数字 / F1-12 / 方向与编辑键 / ctrl·shift·alt·meta；小键盘、F13+、标点不录（避免误录 GUI 自身操作）。
+- 录制期间建议把焦点放在游戏窗口上操作，GUI 内按键不会被误录（白名单外的键不录，字母数字键在 GUI 里操作会被录——需用户注意）。
+
+### 11.3 画面预览与坐标映射
+
+- 预览截图复用引擎 `CaptureBackend`（xcap）**同一链路**：全屏或 `[meta] window` 标题关键字匹配窗口 → 所见即所得，预览里框选的区域就是引擎实际匹配的区域。
+- 预览图按窗口可用区域等比缩放显示；框选时按「显示矩形 ↔ 原图尺寸」比例反算真实像素坐标与尺寸，用于生成模板/region。
+- 录制中 150ms / 空闲 500ms 刷新预览，平衡实时性与占用。
+
+### 11.4 模板采集（框选即存）
+
+- 预览图上拖拽框选 → 显示 `x,y w×h` 像素信息 → 「保存模板」用 `capture_region` 截该区域存 `assets/<name>.png`；「插入 region」生成带 region 的 `wait_image` 占位步骤。
+- 坐标 `click` 步骤可一键「→模板」：以点击坐标为中心截 64×64 模板 → 转 `click_image`（保留 jitter/click_delay 拟人化参数），等价于 `template --x --y --center` 命令的 GUI 化。
+
+### 11.5 步骤编辑与导出
+
+- 左侧面板支持 14 种动作（click / click_image / click_text / wait_image / assert_image / assert_text / find_image / ocr_text / wait / key_press / key_combo / type_text / move_mouse / screenshot），参数按动作类型动态显示（x/y/jitter/precision/timeout/image/text/key/keys/region/verify_exact）。
+- 导出采用**手写 TOML 序列化**（不给引擎核心 Step 加 Serialize，保持核心结构只读契约），输出到 `scenarios/<name>.toml`，与手写场景完全同构，可直接被 `auto-game run` 消费。
+- 「运行场景」后台线程调用 `engine::run_scenario`，结果经 channel 回状态栏；运行中引擎接管鼠标键盘，F9 failsafe 生效。
+
+### 11.6 与既有能力的关系
+
+- GUI 是**编排层**，不重复实现引擎能力：截图/识别/输入/OCR/报告全部复用 `adapter` + `engine`。
+- `template` 命令行采集与 GUI 框选采集并存：命令行适合脚本化批量采集，GUI 适合交互式编排与试错。
+- GUI 产生的场景文件与手写场景文件完全等价，团队可混合使用。
+
+### 11.7 限制与边界
+
+- 预览/录制依赖当前桌面会话与前台窗口（同引擎的运行约束）；
+- OCR 预览/运行若启用，需 `ORT_DYLIB_PATH` 指向 `libs/onnxruntime.dll`（与 CLI 相同）；
+- eframe 0.35 相对 0.34 为不兼容大版本（App trait 改 `ui`、面板统一 `Panel`），升级需按 §CHANGELOG 4.9 迁移。
+
