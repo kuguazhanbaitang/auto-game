@@ -15,6 +15,8 @@ enigo = "0.2"
 image = "0.25"
 # 模板匹配（纯 Rust 实现）
 imageproc = "0.25"
+# 数据并行（模板匹配加速：候选精匹配并行）
+rayon = "1"
 # 配置序列化
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -23,5 +25,4 @@ anyhow = "1"
 # 结构化日志
 tracing = "0.1"
 tracing-subscriber = "0.3"
-# 键盘状态查询（failsafe 热键检测）
-device_query = "4.0"
+device_query = "4.0.1"
