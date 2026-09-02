@@ -40,12 +40,15 @@ impl Match {
 
 /// 识别抽象契约
 pub trait VisionTrait {
-    /// 在屏幕图像中查找模板，返回最佳匹配（无匹配返回 None）
+    /// 在屏幕图像中查找模板，返回最佳匹配（无匹配返回 None）。
+    /// `verify_exact` 为 true 时：金字塔加速定位后在最终位置做精确确认
+    /// （像素级精确 + 准确置信度），金字塔漏检时回退全图精确匹配兜底。
     fn find_template(
         &self,
         screen: &RgbaImage,
         template: &RgbaImage,
         precision: f64,
+        verify_exact: bool,
     ) -> Result<Option<Match>>;
 }
 
@@ -55,6 +58,7 @@ impl VisionTrait for VisionBackend {
         screen: &RgbaImage,
         template: &RgbaImage,
         precision: f64,
+        verify_exact: bool,
     ) -> Result<Option<Match>> {
         if template.width() > screen.width() || template.height() > screen.height() {
             return Err(anyhow!(
@@ -75,11 +79,13 @@ impl VisionTrait for VisionBackend {
             && template.height() >= 16
             && screen.width() >= 128
             && screen.height() >= 128;
-        let found = if use_fast {
-            match_template_fast(&screen_gray, &template_gray, precision as f32)
-        } else {
+        let found = if !use_fast {
             match_template_exact(&screen_gray, &template_gray)
                 .filter(|(_, _, s)| *s >= precision as f32)
+        } else if verify_exact {
+            match_template_verified(&screen_gray, &template_gray, precision as f32)
+        } else {
+            match_template_fast(&screen_gray, &template_gray, precision as f32)
         };
 
         match found {
@@ -92,6 +98,28 @@ impl VisionTrait for VisionBackend {
             })),
             None => Ok(None),
         }
+    }
+}
+
+/// fast→exact 确认路径：先金字塔快速定位，再在最终位置邻域做一次
+/// 精确匹配确认（抹掉降采样可能带来的 ±1px 误差，返回像素级精确位置与准确置信度）；
+/// 金字塔粗层无候选时回退全图精确匹配兜底（慢但保证不漏检）。
+fn match_template_verified(
+    screen: &GrayImage,
+    template: &GrayImage,
+    precision: f32,
+) -> Option<(u32, u32, f32)> {
+    match match_template_fast(screen, template, precision) {
+        Some((x, y, score)) => {
+            // 最终位置邻域精确确认（窗口 = 模板 + 2×radius，覆盖候选 ±radius）
+            match match_local(screen, template, x as i64, y as i64, VERIFY_RADIUS, precision) {
+                Some(m) => Some(m),
+                // 理论不会发生（fast 分数已 ≥ precision，窗口内含该位置）；
+                // 兜底用 fast 结果，避免误报"未命中"
+                None => Some((x, y, score)),
+            }
+        }
+        None => match_template_exact(screen, template).filter(|(_, _, s)| *s >= precision),
     }
 }
 
@@ -119,6 +147,8 @@ const PYRAMID_MIN_TEMPLATE_SIDE: u32 = 12;
 const TOP_K: usize = 10;
 /// 粗层候选的最低置信度底线（防止漏检）
 const CAND_MIN_SCORE: f32 = 0.35;
+/// 确认/精匹配窗口半径：模板左上角在窗口内可滑动 ±radius 像素
+const VERIFY_RADIUS: i64 = 3;
 
 fn downsample(img: &GrayImage) -> GrayImage {
     let w = (img.width() / 2).max(1);
@@ -351,6 +381,40 @@ mod tests {
         assert!(r.is_none(), "无关内容不应在 0.9 阈值下命中：{r:?}");
     }
 
+    #[test]
+    fn verified_matches_exact_on_synthetic() {
+        // fast→exact 确认路径：结果应与精确匹配一致（位置 ≤1px、置信度一致）
+        let (screen, tpl) = synth_screen(200, 160, 98765, 32, 24, 80, 60);
+        let exact = match_template_exact(&screen, &tpl).expect("exact 应找到目标");
+        let verified =
+            match_template_verified(&screen, &tpl, 0.5).expect("verified 应找到目标");
+        assert!(
+            (verified.0 as i64 - exact.0 as i64).abs() <= 1
+                && (verified.1 as i64 - exact.1 as i64).abs() <= 1,
+            "位置不一致：verified={verified:?} exact={exact:?}"
+        );
+        assert!(
+            (verified.2 - exact.2).abs() < 0.02,
+            "置信度不一致：verified={} exact={}",
+            verified.2,
+            exact.2
+        );
+    }
+
+    #[test]
+    fn verified_falls_back_when_fast_misses() {
+        // 无关内容 + 高阈值：fast 无候选 → 回退全图精确匹配兜底，仍应返回 None（不误报）
+        let screen = plain_screen(160, 120, 31415);
+        let mut tpl = GrayImage::new(24, 18);
+        let mut rng = 27182u64;
+        for (_, _, p) in tpl.enumerate_pixels_mut() {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *p = Luma([(rng >> 33) as u8]);
+        }
+        let r = match_template_verified(&screen, &tpl, 0.9);
+        assert!(r.is_none(), "无关内容在 0.9 阈值下不应命中：{r:?}");
+    }
+
     /// 耗时基准（手动运行观察加速比）：cargo test -- --ignored --nocapture
     #[test]
     #[ignore = "耗时基准，手动运行"]
@@ -415,5 +479,38 @@ mod tests {
             }
             None => panic!("真实截图自匹配不应失败"),
         }
+    }
+
+    /// fast→exact 确认路径的开销基准：确认只做一次「模板+2×radius」小窗口精确匹配，
+    /// 应显著快于全图精确匹配（验证「确认」不牺牲加速收益）。
+    #[test]
+    #[ignore = "耗时基准，手动运行"]
+    fn bench_verify_overhead() {
+        let (screen, tpl) = synth_screen(400, 300, 999, 50, 40, 180, 130);
+        let n = 30u32;
+        let t0 = Instant::now();
+        for _ in 0..n {
+            assert!(match_template_fast(&screen, &tpl, 0.5).is_some());
+        }
+        let fast_ms = (t0.elapsed().as_micros() / n as u128) as f64 / 1000.0;
+        let t1 = Instant::now();
+        for _ in 0..n {
+            assert!(match_template_verified(&screen, &tpl, 0.5).is_some());
+        }
+        let verified_ms = (t1.elapsed().as_micros() / n as u128) as f64 / 1000.0;
+        // 全图精确匹配在 debug 下单次就很慢，只跑 2 次取平均
+        let t2 = Instant::now();
+        for _ in 0..2 {
+            assert!(match_template_exact(&screen, &tpl).is_some());
+        }
+        let exact_ms = (t2.elapsed().as_micros() / 2u128) as f64 / 1000.0;
+        println!(
+            "\n[bench] fast={fast_ms:.2}ms   fast→exact确认={verified_ms:.2}ms   全图exact={exact_ms:.2}ms"
+        );
+        // 确认路径只比 fast 多一次小窗口匹配（毫秒级），且远快于全图精确匹配
+        assert!(
+            verified_ms < exact_ms / 4.0,
+            "确认路径应明显快于全图精确匹配"
+        );
     }
 }

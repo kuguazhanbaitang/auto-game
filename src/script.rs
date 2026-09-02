@@ -22,6 +22,11 @@ pub struct Scenario {
 pub struct Meta {
     pub name: Option<String>,
     pub window: Option<String>,
+    /// fast→exact 确认开关：开启后，金字塔加速定位的每个模板
+    /// 都会在最终位置再跑一次精确匹配确认（像素级精确 + 准确置信度）；
+    /// 金字塔粗层无候选时自动回退全图精确匹配兜底。默认 false。
+    #[serde(default)]
+    pub verify_exact: bool,
 }
 
 /// 单步动作
@@ -88,6 +93,7 @@ mod tests {
 [meta]
 name = "解析测试"
 window = "MyGame"
+verify_exact = true
 
 [[step]]
 action = "wait_image"
@@ -117,6 +123,7 @@ region = { x = 0, y = 0, w = 500, h = 400 }
         let s: Scenario = toml::from_str(toml).expect("场景应能解析");
         assert_eq!(s.meta.name.as_deref(), Some("解析测试"));
         assert_eq!(s.meta.window.as_deref(), Some("MyGame"));
+        assert!(s.meta.verify_exact, "verify_exact 应解析为 true");
         assert_eq!(s.steps.len(), 5);
 
         assert_eq!(s.steps[0].action, "wait_image");
@@ -143,6 +150,12 @@ region = { x = 0, y = 0, w = 500, h = 400 }
     fn empty_scenario_is_valid() {
         let s: Scenario = toml::from_str("").expect("空场景应可解析");
         assert!(s.steps.is_empty());
+    }
+
+    #[test]
+    fn meta_verify_exact_defaults_to_false() {
+        let s: Scenario = toml::from_str("[meta]\nname = \"x\"\n").expect("场景应可解析");
+        assert!(!s.meta.verify_exact, "未声明 verify_exact 时应默认 false");
     }
 
     #[test]

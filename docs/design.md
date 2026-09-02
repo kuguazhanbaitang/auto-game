@@ -86,8 +86,8 @@ click() -> Result<()>                            // enigo 左键点击
 key_press(key) -> Result<()>                     // enigo 按键
 key_combo(&[Key]) -> Result<()>                  // 组合键：先全按、再逆序释放
 type_text(&str) -> Result<()>                    // enigo 输入文本
-find_image(tpl, precision) -> Result<Option<Match>>             // 全屏 NCC 匹配
-find_image_region(tpl, precision, Region) -> Result<Option<Match>> // 区域限定匹配
+find_image(tpl, precision, verify_exact) -> Result<Option<Match>>             // 全屏 NCC 匹配
+find_image_region(tpl, precision, Region, verify_exact) -> Result<Option<Match>> // 区域限定匹配
 
 // 辅助结构（src/adapter/）
 Region { x, y, w, h }          // 搜索区域（serde Deserialize）
@@ -104,6 +104,7 @@ Key 枚举 + key_from_str(&str)  // 全量游戏键位，大小写/别名兼容�
 [meta]
 name = "登录主菜单冒烟"
 window = "MyGame"          # 可选：限定窗口（xcap 捕获）
+verify_exact = true        # 可选：fast→exact 确认开关，见 §6.10（默认 false）
 
 [[step]]
 action = "wait_image"
@@ -136,11 +137,14 @@ timeout = 20
 动作原语一览（M3 + 打磨轮已实现）：
 `wait_image` / `find_image` / `click_image` / `click`(坐标) / `move_mouse` / `key_press` / `key_combo`(组合键) / `type_text` / `assert_image` / `wait`(固定延时) / `screenshot`(存档证据) / `repeat`+`end_repeat`(循环) / `if_image`+`else`+`end_if`(条件分支)
 
-通用参数：
+通用参数（`[[step]]`）：
 - `precision`：匹配置信度阈值 0.0~1.0，默认 `0.85`（图像类）
 - `timeout`：超时秒数，默认 `15`（等待/断言类）
 - `region`：限定搜索区域 `{ x, y, w, h }`，**强烈建议指定**以规避全屏匹配的性能瓶颈（图像类）
 - `jitter`：点击随机抖动像素，每次点击在目标 ±N 内动态分布，拟人化（仅 `click` / `click_image`）
+
+全局开关（`[meta]`）：
+- `verify_exact`：模板匹配「fast→exact 确认」开关，默认 `false`。开启后每个模板在金字塔定位后再做一次像素级精确确认（返回确切位置与准确置信度，适合"点击必须落在确切像素"的极端需求），金字塔漏检时自动回退全图精确匹配兜底；实测仅比 fast 多 ~16% 开销，详见 §6.10。
 
 拟人化点击（jitter）示例：
 ```toml
@@ -204,6 +208,7 @@ action = "end_repeat"
 7. **拟人化点击（jitter）**：零依赖 xorshift64* 随机源（启动时按时间播种），`click` / `click_image` 坐标在 ±N 内随机分布；`click_image` 偏移自动限制在模板范围内避免点出元素；报告显示实际点击坐标与基座、偏移量；
 8. **模板采集（template 子命令）**：用代码截图生成模板 PNG 到 `assets/`，同时打印坐标与可直接粘贴的 TOML 片段（`image` + `region`），「截图→模板→坐标→场景片段」闭环，无需手工截图裁图；
 9. **模板匹配加速（金字塔 + 并行）**：图像金字塔粗到细——先在低分辨率全图粗定位 top-K 候选，再逐层在候选邻域（窗口 = 模板尺寸 + 2×radius）并行精匹配，把「全屏大匹配」变为「若干小窗口匹配」；语义不变（仍返回全局最高置信度位置）。合成基准实测 debug 下 400×300 + 50×40 模板：**~14s → ~0.16s（≈88x）**；小图/小模板（<128px 或模板 <16px）自动回退精确匹配。
+10. **fast→exact 确认开关（`[meta] verify_exact`）**：默认金字塔加速返回近似位置与置信度（±1px 内），适合绝大多数点击；当需求升级为"点击必须落在确切像素"时，在 `[meta]` 开 `verify_exact = true`，引擎对每个模板走「fast 粗定位 → 最终位置精确确认」：确认复用「模板尺寸 + 2×radius」邻域做一次精确 NCC（抹掉降采样累积误差、给出准确置信度），若金字塔粗层无候选（极端漏检）则自动回退全图精确匹配兜底，保证不漏检。合成基准（400×300 + 50×40 模板，debug）：fast=142ms vs fast→exact 确认=166ms（仅多 ~24ms）vs 全图精确=11.5s（≈69x）——"确认"不牺牲加速收益。
 
 ---
 
@@ -215,7 +220,7 @@ action = "end_repeat"
 | **M1 原语** | Vision trait 落地模板匹配，实现 click_image / wait_image / assert_image | 可对一个游戏完成「找图→点击→验证」手写调用 |
 | **M2 引擎** | TOML 脚本解析 + 流程引擎 + 报告 | 纯配置文件能跑通一个冒烟场景 |
 | **M3 增强** | ✅ 条件分支/循环、✅ HTML 报告 | 覆盖多场景，报告可读（HTML 已可读） |
-| **打磨轮** | ✅ key_combo 全量按键、✅ region 区域限定匹配、✅ F9 failsafe、✅ template 模板采集子命令、✅ 失败自动存档+新旧对照图、✅ jitter 拟人化点击、✅ 模板匹配加速（金字塔+并行，实测 ~88x） | 22 个单测全绿（另 2 个 ignored 基准/真实截图），实跑闭环验证 |
+| **打磨轮** | ✅ key_combo 全量按键、✅ region 区域限定匹配、✅ F9 failsafe、✅ template 模板采集子命令、✅ 失败自动存档+新旧对照图、✅ jitter 拟人化点击、✅ 模板匹配加速（金字塔+并行，实测 ~88x）、✅ fast→exact 确认开关（[meta] verify_exact，实测仅多 ~16% 开销） | 25 个单测全绿（另 3 个 ignored 基准/真实截图），实跑闭环验证 |
 | **M4 候选** | 窗口级捕获（capture_window + 坐标映射）、点击随机延时、OCR 接入（tesseract-rs / ddddocr）、GUI 录制器（egui）、场景静态校验、GitHub Actions CI + 打包 | 按用户优先级推进 |
 
 ---
