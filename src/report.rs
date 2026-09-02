@@ -164,3 +164,51 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_report() -> Report {
+        let mut r = Report::new("测试场景".to_string());
+        r.record(1, "wait", "固定等待 0.5s".into(), Status::Pass, Duration::from_millis(500));
+        r.record(2, "click", "点击坐标 (10, 20)".into(), Status::Fail, Duration::from_millis(30));
+        r
+    }
+
+    #[test]
+    fn record_and_summary() {
+        let r = sample_report();
+        assert_eq!(r.steps.len(), 2);
+        assert_eq!(r.summary(), (1, 1));
+        assert!(!r.all_passed());
+    }
+
+    #[test]
+    fn all_passed_when_no_failure() {
+        let mut r = Report::new("t".into());
+        r.record(1, "wait", "x".into(), Status::Pass, Duration::ZERO);
+        assert!(r.all_passed());
+    }
+
+    #[test]
+    fn html_escapes_injection() {
+        let mut r = Report::new("<script>alert(1)</script>".into());
+        r.record(1, "x", "a < b & c \"quote\"".into(), Status::Pass, Duration::ZERO);
+        let html = r.render_html();
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "场景名应被转义");
+        assert!(html.contains("a &lt; b &amp; c &quot;quote&quot;"), "详情应被转义");
+        assert!(!html.contains("<script>"), "不得输出原始脚本标签");
+    }
+
+    #[test]
+    fn html_contains_summary_and_rows() {
+        let r = sample_report();
+        let html = r.render_html();
+        assert!(html.contains("测试场景"));
+        assert!(html.contains("class=\"pass\""));
+        assert!(html.contains("class=\"fail\""));
+        assert!(html.contains("PASS"));
+        assert!(html.contains("FAIL"));
+    }
+}
