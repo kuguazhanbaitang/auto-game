@@ -1,9 +1,21 @@
 # Rust 构建产物
 /target
+/D:/auto-game-target
 
 # 本地验证产物（截图/报告）
 screenshot_*.png
 /reports/
+
+# vendor 依赖：仅保留源码与必要清单，忽略 cargo/编辑器杂项
+vendor/paddleocr_rs_onnx/.cargo-ok
+vendor/paddleocr_rs_onnx/.cargo_vcs_info.json
+vendor/paddleocr_rs_onnx/Cargo.lock
+vendor/paddleocr_rs_onnx/Cargo.toml.orig
+vendor/paddleocr_rs_onnx/examples/
+vendor/paddleocr_rs_onnx/build-android.ps1
+vendor/paddleocr_rs_onnx/build-android.sh
+vendor/paddleocr_rs_onnx/build-ios.ps1
+vendor/paddleocr_rs_onnx/build-ios.sh
 
 # 编辑器
 .idea/
