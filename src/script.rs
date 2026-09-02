@@ -44,6 +44,9 @@ pub struct Step {
     pub x: Option<i32>,
     #[serde(default)]
     pub y: Option<i32>,
+    /// 点击随机抖动（像素）：每次点击位置在目标周围 ±jitter 内动态分布，拟人化
+    #[serde(default)]
+    pub jitter: Option<u32>,
     /// 输入文本
     #[serde(default)]
     pub text: Option<String>,
@@ -104,6 +107,7 @@ count = 3
 action = "click"
 x = 100
 y = 200
+jitter = 5
 
 [[step]]
 action = "if_image"
@@ -129,6 +133,7 @@ region = { x = 0, y = 0, w = 500, h = 400 }
 
         assert_eq!(s.steps[3].x, Some(100));
         assert_eq!(s.steps[3].y, Some(200));
+        assert_eq!(s.steps[3].jitter, Some(5));
 
         let r = s.steps[4].region.expect("region 应被解析");
         assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 500, 400));

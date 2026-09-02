@@ -15,6 +15,7 @@
 - **区域匹配**：可限定搜索区域，规避全屏模板匹配的性能瓶颈（M1 实测全屏朴素算法极慢，区域化后大幅提速）
 - **紧急停止（failsafe）**：运行中随时按 `F9` 中止，防止脚本失控
 - **失败现场存档**：任一步骤失败自动保存现场截图；若该步带模板，再生成「左=旧模板 / 右=现场」对照图，UI 变更一目了然
+- **拟人化点击**：点击动作支持 `jitter` 随机抖动——每次点击位置在目标周围动态分布，不总点同一个像素，更接近真人操作
 - **组合键**：`key_combo` 支持 Ctrl+A 等组合键；按键覆盖游戏常用键位（WASD/数字/F1-F12/方向/修饰键）
 - **报告**：文本报告 + HTML 报告（状态着色、耗时统计、注入转义）
 - **可插拔后端**：截图 / 输入 / 识别全部封装在 trait 之后，可替换底层库（xcap / enigo / rustautogui）
@@ -141,7 +142,7 @@ timeout = 20
 | `screenshot` | — | 全屏截图存档到 `reports/<场景>/step_<n>.png` |
 | `wait` | `seconds` | 固定延时（秒） |
 | `move_mouse` | `x`, `y` | 移动鼠标到屏幕坐标 |
-| `click` | `x`, `y` | 移动到坐标并左键点击 |
+| `click` | `x`, `y`, `jitter` | 移动到坐标并左键点击；`jitter` 可在 ±N 像素内随机偏移 |
 | `key_press` | `key` | 按下单个按键 |
 | `key_combo` | `keys` | 组合键，如 `keys = ["ctrl", "a"]` |
 | `type_text` | `text` | 输入一段文本 |
@@ -152,7 +153,7 @@ timeout = 20
 |---|---|---|
 | `find_image` | `image`, `precision`, `region` | 查找模板，输出位置与置信度（未找到不算失败） |
 | `wait_image` | `image`, `precision`, `timeout`, `region` | 轮询等待模板出现（200ms 间隔） |
-| `click_image` | `image`, `precision`, `region` | 找到模板并点击其中心；未找到则失败 |
+| `click_image` | `image`, `precision`, `region`, `jitter` | 找到模板并点击其中心；未找到则失败 |
 | `assert_image` | `image`, `precision`, `timeout`, `region` | 断言模板在超时内出现；否则失败 |
 | `if_image` | `image`, `precision`, `region` | 条件判断：命中走 then 分支，未命中走 else/跳过 |
 
@@ -163,6 +164,7 @@ timeout = 20
 | `precision` | 图像类 | 匹配置信度阈值 0.0~1.0，默认 `0.85` |
 | `timeout` | 等待/断言类 | 超时秒数，默认 `15` |
 | `region` | 图像类 | 限定搜索区域 `{ x, y, w, h }`，**强烈建议指定**以提升性能 |
+| `jitter` | `click` / `click_image` | 点击随机抖动像素，每次点击在目标 ±N 内动态分布，默认 `0`（精确点击） |
 
 ### 控制流
 
@@ -260,6 +262,37 @@ cargo run -- template --name attack_btn --at-mouse --center --w 80 --h 80
 
 ---
 
+## 🖱️ 拟人化点击（jitter）
+
+默认点击总是落在模板中心/指定坐标（同一像素点）。开启 `jitter` 后，每次点击位置在目标周围 **±N 像素**内随机分布，更接近真人操作，也避免长期机械重复同一坐标：
+
+```toml
+# 坐标点击：以 (500, 400) 为中心，每次在 ±10px 内随机偏移
+[[step]]
+action = "click"
+x = 500
+y = 400
+jitter = 10
+
+# 模板点击：以模板中心为基座，偏移被限制在模板范围内（不会点出元素）
+[[step]]
+action = "click_image"
+image = "attack_btn.png"
+region = { x = 800, y = 600, w = 120, h = 60 }
+jitter = 8
+```
+
+要点：
+- `jitter = 0`（默认）→ 精确点击，行为与之前完全一致
+- `click` 的偏移：基座坐标 ± jitter
+- `click_image` 的偏移：以模板中心为基座，且**自动限制在模板范围内**，保证不会点偏到目标外
+- 报告会显示实际点击坐标与基座、偏移量，方便追溯：
+  ```
+  点击坐标 (504, 397)（基座 (500, 400) + jitter (4, -3)）
+  ```
+
+---
+
 ## 🖼️ 区域匹配（性能要点）
 
 **背景**：默认的模板匹配是"全屏截取 → 朴素算法扫描"，在 debug 模式下 500×400 区域就实测约 78 秒，全屏更久。
@@ -326,7 +359,7 @@ region = { x = 1600, y = 900, w = 300, h = 150 }
 ```bash
 cargo test          # 运行单元测试（脚本解析 / 控制流编译 / 报告 / 按键映射）
 ```
-自带 18 个单元测试，覆盖：TOML 解析、`repeat`/`if`/`else` 配对与跳转填充、未闭合报错、嵌套控制流、报告汇总与 HTML 转义、按键名解析与映射、失败对照图拼接。
+自带 20 个单元测试，覆盖：TOML 解析、`repeat`/`if`/`else` 配对与跳转填充、未闭合报错、嵌套控制流、报告汇总与 HTML 转义、按键名解析与映射、失败对照图拼接、点击 jitter 随机偏移。
 
 `scenarios/` 下还提供了可执行演示场景：
 - `demo.toml` — M2 冒烟（全链路）
