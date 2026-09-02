@@ -3,6 +3,7 @@
 //! CLI 入口：
 //!   auto-game run <场景.toml> [--assets <资源目录>]
 //!   auto-game template [选项]   # 模板采集：截图存 assets + 输出坐标/TOML 片段
+//!   auto-game gui [--assets <资源目录>]   # GUI 录制器：可视化编排场景
 
 use std::path::PathBuf;
 
@@ -19,10 +20,28 @@ fn main() -> Result<()> {
     match cmd {
         "run" => cmd_run(&args[2..]),
         "template" => cmd_template(&args[2..]),
+        "gui" => cmd_gui(&args[2..]),
         _ => bail!(
-            "用法:\n  auto-game run <场景.toml> [--assets <资源目录>]\n  auto-game template [选项]  # 模板采集"
+            "用法:\n  auto-game run <场景.toml> [--assets <资源目录>]\n  auto-game template [选项]  # 模板采集\n  auto-game gui [--assets <资源目录>]  # GUI 录制器"
         ),
     }
+}
+
+// ---------------- gui：GUI 录制器 ----------------
+
+fn cmd_gui(args: &[String]) -> Result<()> {
+    let mut assets_dir = PathBuf::from("assets");
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--assets" if i + 1 < args.len() => {
+                assets_dir = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
+            other => bail!("未知参数: {other}"),
+        }
+    }
+    auto_game::gui::run_gui(assets_dir)
 }
 
 // ---------------- run：执行场景 ----------------

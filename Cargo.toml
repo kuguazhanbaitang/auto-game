@@ -31,3 +31,7 @@ device_query = "4.0.1"
 # 依赖本地 vendor（上游 0.2.7 在默认 feature 下引用 ort::ep::* 无法编译，已本地打补丁）
 # 运行时依赖 libs/onnxruntime.dll，运行前设 ORT_DYLIB_PATH，见 README「OCR 文字识别」
 paddleocr_rs_onnx = { path = "vendor/paddleocr_rs_onnx", version = "0.2.7" }
+# GUI 录制器（egui/eframe）
+# 注意：eframe 0.35 默认 features 含 wgpu，其 D3D12 与 xcap/enigo 的 windows crate
+# 版本冲突导致 wgpu-hal 编译失败 → 显式禁用默认、改用 glow（OpenGL）渲染后端
+eframe = { version = "0.35.0", default-features = false, features = ["glow", "default_fonts", "accesskit"] }

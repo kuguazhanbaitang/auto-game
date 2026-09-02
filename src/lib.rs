@@ -5,5 +5,6 @@
 pub mod action;
 pub mod adapter;
 pub mod engine;
+pub mod gui;
 pub mod report;
 pub mod script;
