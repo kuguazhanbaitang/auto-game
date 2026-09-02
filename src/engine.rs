@@ -5,6 +5,8 @@
 //! - `if_image`（需 `image`）... [`else`] ... `end_if`：条件分支
 
 use std::path::{Path, PathBuf};
+use std::sync::Once;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -288,9 +290,15 @@ impl Engine {
 
     fn exec_click(&self, step: &Step) -> Result<String> {
         let (x, y) = req_xy(step)?;
-        self.actions.move_mouse(x, y)?;
+        let (dx, dy) = jitter_offset(step.jitter.unwrap_or(0));
+        let (cx, cy) = (x + dx, y + dy);
+        self.actions.move_mouse(cx, cy)?;
         self.actions.click()?;
-        Ok(format!("点击坐标 ({x}, {y})"))
+        if dx != 0 || dy != 0 {
+            Ok(format!("点击坐标 ({cx}, {cy})（基座 ({x}, {y}) + jitter ({dx}, {dy})）"))
+        } else {
+            Ok(format!("点击坐标 ({cx}, {cy})"))
+        }
     }
 
     fn exec_key_press(&self, step: &Step) -> Result<String> {
@@ -343,10 +351,30 @@ impl Engine {
         let m = self
             .find_match(step)?
             .ok_or_else(|| anyhow!("click_image 失败：未找到目标图像"))?;
-        let (cx, cy) = m.center();
+        let (bx, by) = m.center();
+        let (cx, cy) = if let Some(j) = step.jitter {
+            let (dx, dy) = jitter_offset(j);
+            // 限制在模板范围内，避免点出目标元素
+            let half_w = m.width as i32 / 2;
+            let half_h = m.height as i32 / 2;
+            (
+                (bx + dx).clamp(bx - half_w, bx + half_w),
+                (by + dy).clamp(by - half_h, by + half_h),
+            )
+        } else {
+            (bx, by)
+        };
         self.actions.move_mouse(cx, cy)?;
         self.actions.click()?;
-        Ok(format!("点击模板中心 ({cx}, {cy})，置信度 {:.4}", m.confidence))
+        if cx != bx || cy != by {
+            Ok(format!(
+                "点击模板中心附近 ({cx}, {cy})（基座 ({bx}, {by})，jitter={}），置信度 {:.4}",
+                step.jitter.unwrap_or(0),
+                m.confidence
+            ))
+        } else {
+            Ok(format!("点击模板中心 ({cx}, {cy})，置信度 {:.4}", m.confidence))
+        }
     }
 
     fn exec_assert_image(&self, step: &Step) -> Result<String> {
@@ -433,6 +461,37 @@ fn build_diff_image(old: &RgbaImage, new: &RgbaImage) -> RgbaImage {
     imageops::overlay(&mut canvas, old, 0, 0);
     imageops::overlay(&mut canvas, new, (old.width() + sep) as i64, 0);
     canvas
+}
+
+/// —— 拟人化点击：轻量 xorshift64* 随机源（零依赖、线程安全）——
+static RNG_SEED: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+static RNG_INIT: Once = Once::new();
+
+fn rng_next() -> u64 {
+    RNG_INIT.call_once(|| {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        RNG_SEED.store(t ^ 0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    });
+    let mut x = RNG_SEED.load(Ordering::Relaxed);
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    RNG_SEED.store(x, Ordering::Relaxed);
+    x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
+/// 在 ±max_px 内生成随机整数偏移（拟人化点击；max_px=0 时无偏移）
+fn jitter_offset(max_px: u32) -> (i32, i32) {
+    if max_px == 0 {
+        return (0, 0);
+    }
+    let span = max_px as u64 * 2 + 1;
+    let dx = (rng_next() % span) as i32 - max_px as i32;
+    let dy = (rng_next() % span) as i32 - max_px as i32;
+    (dx, dy)
 }
 
 /// 把扁平步骤编译成指令序列（配对控制结构、填充跳转）
@@ -670,5 +729,28 @@ mod tests {
         assert_eq!(diff.get_pixel(0, 0), &Rgba([255, 0, 0, 255]));
         // 右侧应为新模板蓝色像素（偏移 = 20 + 10）
         assert_eq!(diff.get_pixel(30, 0), &Rgba([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn jitter_zero_has_no_offset() {
+        assert_eq!(jitter_offset(0), (0, 0));
+    }
+
+    #[test]
+    fn jitter_stays_in_range_and_varies() {
+        let mut saw_neg = false;
+        let mut saw_pos = false;
+        for _ in 0..1000 {
+            let (dx, dy) = jitter_offset(10);
+            assert!(dx >= -10 && dx <= 10, "dx={dx} 越界");
+            assert!(dy >= -10 && dy <= 10, "dy={dy} 越界");
+            if dx < 0 {
+                saw_neg = true;
+            }
+            if dx > 0 {
+                saw_pos = true;
+            }
+        }
+        assert!(saw_neg && saw_pos, "偏移应覆盖正负两侧，保证点击位置动态分布");
     }
 }
