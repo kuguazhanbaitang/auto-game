@@ -30,7 +30,7 @@ pub struct Meta {
 }
 
 /// 单步动作
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Step {
     /// 动作类型：screenshot / wait / move_mouse / click / key_press /
     /// type_text / find_image / wait_image / click_image / assert_image
@@ -52,6 +52,13 @@ pub struct Step {
     /// 点击随机抖动（像素）：每次点击位置在目标周围 ±jitter 内动态分布，拟人化
     #[serde(default)]
     pub jitter: Option<u32>,
+    /// 点击前随机延时（秒）：click / click_image 执行前随机等待 [0, click_delay]，拟人化；
+    /// 与 jitter 配合让「位置 + 时机」都不固定。缺省/≤0 表示不延时。
+    #[serde(default)]
+    pub click_delay: Option<f64>,
+    /// 点击随机延时下限（秒）：配合 click_delay 组成 [min, max] 区间；缺省 0
+    #[serde(default)]
+    pub click_delay_min: Option<f64>,
     /// 输入文本
     #[serde(default)]
     pub text: Option<String>,
@@ -118,6 +125,8 @@ action = "click"
 x = 100
 y = 200
 jitter = 5
+click_delay = 0.3
+click_delay_min = 0.1
 
 [[step]]
 action = "if_image"
@@ -146,6 +155,8 @@ verify_exact = false
         assert_eq!(s.steps[3].x, Some(100));
         assert_eq!(s.steps[3].y, Some(200));
         assert_eq!(s.steps[3].jitter, Some(5));
+        assert_eq!(s.steps[3].click_delay, Some(0.3));
+        assert_eq!(s.steps[3].click_delay_min, Some(0.1));
 
         let r = s.steps[4].region.expect("region 应被解析");
         assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 500, 400));

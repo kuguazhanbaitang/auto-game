@@ -309,12 +309,19 @@ impl Engine {
         let (dx, dy) = jitter_offset(step.jitter.unwrap_or(0));
         let (cx, cy) = (x + dx, y + dy);
         self.actions.move_mouse(cx, cy)?;
-        self.actions.click()?;
-        if dx != 0 || dy != 0 {
-            Ok(format!("点击坐标 ({cx}, {cy})（基座 ({x}, {y}) + jitter ({dx}, {dy})）"))
-        } else {
-            Ok(format!("点击坐标 ({cx}, {cy})"))
+        let delay = random_click_delay(step);
+        if delay > 0.0 {
+            std::thread::sleep(Duration::from_secs_f64(delay));
         }
+        self.actions.click()?;
+        let mut note = format!("点击坐标 ({cx}, {cy})");
+        if dx != 0 || dy != 0 {
+            note = format!("{note}（基座 ({x}, {y}) + jitter ({dx}, {dy})）");
+        }
+        if delay > 0.0 {
+            note = format!("{note}，点击前随机延时 {delay:.3}s");
+        }
+        Ok(note)
     }
 
     fn exec_key_press(&self, step: &Step) -> Result<String> {
@@ -381,11 +388,20 @@ impl Engine {
             (bx, by)
         };
         self.actions.move_mouse(cx, cy)?;
+        let delay = random_click_delay(step);
+        if delay > 0.0 {
+            std::thread::sleep(Duration::from_secs_f64(delay));
+        }
         self.actions.click()?;
         if cx != bx || cy != by {
             Ok(format!(
-                "点击模板中心附近 ({cx}, {cy})（基座 ({bx}, {by})，jitter={}），置信度 {:.4}",
+                "点击模板中心附近 ({cx}, {cy})（基座 ({bx}, {by})，jitter={}，延时 {delay:.3}s），置信度 {:.4}",
                 step.jitter.unwrap_or(0),
+                m.confidence
+            ))
+        } else if delay > 0.0 {
+            Ok(format!(
+                "点击模板中心 ({cx}, {cy})（点击前随机延时 {delay:.3}s），置信度 {:.4}",
                 m.confidence
             ))
         } else {
@@ -508,6 +524,22 @@ fn jitter_offset(max_px: u32) -> (i32, i32) {
     let dx = (rng_next() % span) as i32 - max_px as i32;
     let dy = (rng_next() % span) as i32 - max_px as i32;
     (dx, dy)
+}
+
+/// 点击前随机延时（秒）：在 [click_delay_min, click_delay] 内均匀分布（纳秒精度）。
+/// 未配置（click_delay 缺省/≤0）或区间非法（min ≥ max）时返回 0（不延时）。
+fn random_click_delay(step: &Step) -> f64 {
+    let max = step.click_delay.unwrap_or(0.0);
+    if max <= 0.0 {
+        return 0.0;
+    }
+    let min = step.click_delay_min.unwrap_or(0.0).clamp(0.0, max);
+    if min >= max {
+        return 0.0;
+    }
+    // 用纳秒整数做区间采样，避免浮点取模误差；结果再换算回秒
+    let span_ns = ((max - min) * 1e9) as u64;
+    min + (rng_next() % span_ns) as f64 / 1e9
 }
 
 /// 把扁平步骤编译成指令序列（配对控制结构、填充跳转）
@@ -768,5 +800,58 @@ mod tests {
             }
         }
         assert!(saw_neg && saw_pos, "偏移应覆盖正负两侧，保证点击位置动态分布");
+    }
+
+    #[test]
+    fn click_delay_not_configured_returns_zero() {
+        let s = Step { action: "click".into(), ..Default::default() };
+        assert_eq!(random_click_delay(&s), 0.0);
+    }
+
+    #[test]
+    fn click_delay_invalid_range_returns_zero() {
+        // min >= max 视为区间非法，不延时
+        let s = Step {
+            action: "click".into(),
+            click_delay: Some(0.2),
+            click_delay_min: Some(0.3),
+            ..Default::default()
+        };
+        assert_eq!(random_click_delay(&s), 0.0);
+        // max <= 0 不延时
+        let s2 = Step { action: "click".into(), click_delay: Some(0.0), ..Default::default() };
+        assert_eq!(random_click_delay(&s2), 0.0);
+    }
+
+    #[test]
+    fn click_delay_stays_in_range() {
+        let s = Step {
+            action: "click".into(),
+            click_delay: Some(0.5),
+            click_delay_min: Some(0.1),
+            ..Default::default()
+        };
+        let mut saw_low = false;
+        let mut saw_high = false;
+        for _ in 0..1000 {
+            let d = random_click_delay(&s);
+            assert!((0.1..=0.5).contains(&d), "延时 {d} 越界 [0.1, 0.5]");
+            if d < 0.2 {
+                saw_low = true;
+            }
+            if d > 0.4 {
+                saw_high = true;
+            }
+        }
+        assert!(saw_low && saw_high, "延时应在区间内动态分布，而非固定值");
+    }
+
+    #[test]
+    fn click_delay_min_defaults_to_zero() {
+        let s = Step { action: "click".into(), click_delay: Some(0.5), ..Default::default() };
+        for _ in 0..1000 {
+            let d = random_click_delay(&s);
+            assert!((0.0..=0.5).contains(&d), "延时 {d} 越界 [0, 0.5]");
+        }
     }
 }

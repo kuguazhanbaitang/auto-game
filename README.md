@@ -146,7 +146,7 @@ timeout = 20
 | `screenshot` | — | 全屏截图存档到 `reports/<场景>/step_<n>.png` |
 | `wait` | `seconds` | 固定延时（秒） |
 | `move_mouse` | `x`, `y` | 移动鼠标到屏幕坐标 |
-| `click` | `x`, `y`, `jitter` | 移动到坐标并左键点击；`jitter` 可在 ±N 像素内随机偏移 |
+| `click` | `x`, `y`, `jitter`, `click_delay` | 移动到坐标并左键点击；`jitter` 可在 ±N 像素内随机偏移，`click_delay` 点击前随机等待 |
 | `key_press` | `key` | 按下单个按键 |
 | `key_combo` | `keys` | 组合键，如 `keys = ["ctrl", "a"]` |
 | `type_text` | `text` | 输入一段文本 |
@@ -157,7 +157,7 @@ timeout = 20
 |---|---|---|
 | `find_image` | `image`, `precision`, `region` | 查找模板，输出位置与置信度（未找到不算失败） |
 | `wait_image` | `image`, `precision`, `timeout`, `region` | 轮询等待模板出现（200ms 间隔） |
-| `click_image` | `image`, `precision`, `region`, `jitter` | 找到模板并点击其中心；未找到则失败 |
+| `click_image` | `image`, `precision`, `region`, `jitter`, `click_delay` | 找到模板并点击其中心；未找到则失败 |
 | `assert_image` | `image`, `precision`, `timeout`, `region` | 断言模板在超时内出现；否则失败 |
 | `if_image` | `image`, `precision`, `region` | 条件判断：命中走 then 分支，未命中走 else/跳过 |
 
@@ -169,6 +169,8 @@ timeout = 20
 | `timeout` | 等待/断言类 | 超时秒数，默认 `15` |
 | `region` | 图像类 | 限定搜索区域 `{ x, y, w, h }`，**强烈建议指定**以提升性能 |
 | `jitter` | `click` / `click_image` | 点击随机抖动像素，每次点击在目标 ±N 内动态分布，默认 `0`（精确点击） |
+| `click_delay` | `click` / `click_image` | 点击前随机延时（秒）：每次点击前随机等待 `[0, click_delay]`，拟人化；缺省/`≤0` 不延时 |
+| `click_delay_min` | `click` / `click_image` | 点击随机延时下限（秒），配合 `click_delay` 组成 `[min, max]` 区间（可选） |
 | `verify_exact` | 图像类 | 按步骤覆盖全局开关：显式 `true` / `false` 覆盖 `[meta] verify_exact`，缺省回退全局值 |
 
 **全局开关（`[meta]`）**：
@@ -273,17 +275,20 @@ cargo run -- template --name attack_btn --at-mouse --center --w 80 --h 80
 
 ---
 
-## 🖱️ 拟人化点击（jitter）
+## 🖱️ 拟人化点击（jitter + 随机延时）
 
-默认点击总是落在模板中心/指定坐标（同一像素点）。开启 `jitter` 后，每次点击位置在目标周围 **±N 像素**内随机分布，更接近真人操作，也避免长期机械重复同一坐标：
+默认点击总是落在模板中心/指定坐标（同一像素点）、时机固定。拟人化有两层——**位置**用 `jitter` 随机，**时机**用 `click_delay` 随机：
 
 ```toml
-# 坐标点击：以 (500, 400) 为中心，每次在 ±10px 内随机偏移
+# 坐标点击：以 (500, 400) 为中心，每次在 ±10px 内随机偏移，
+#             且点击前随机等待 0.1~0.3s（位置 + 时机都不固定）
 [[step]]
 action = "click"
 x = 500
 y = 400
 jitter = 10
+click_delay = 0.3
+click_delay_min = 0.1
 
 # 模板点击：以模板中心为基座，偏移被限制在模板范围内（不会点出元素）
 [[step]]
@@ -291,16 +296,20 @@ action = "click_image"
 image = "attack_btn.png"
 region = { x = 800, y = 600, w = 120, h = 60 }
 jitter = 8
+click_delay = 0.2
 ```
 
 要点：
 - `jitter = 0`（默认）→ 精确点击，行为与之前完全一致
-- `click` 的偏移：基座坐标 ± jitter
-- `click_image` 的偏移：以模板中心为基座，且**自动限制在模板范围内**，保证不会点偏到目标外
-- 报告会显示实际点击坐标与基座、偏移量，方便追溯：
+- `click` 的偏移：基座坐标 ± jitter；`click_image` 的偏移以模板中心为基座，且**自动限制在模板范围内**，保证不会点偏到目标外
+- `click_delay = 0.3` → 每次点击前随机等待 `[0, 0.3]s`；再配 `click_delay_min = 0.1` → 随机等待 `[0.1, 0.3]s`（真实玩家连点从不精确等长）
+- `click_delay` 缺省 / `≤ 0`，或 `min ≥ max` → 不延时（向后兼容）
+- 报告会显示实际点击坐标与基座、偏移量及延时，方便追溯：
   ```
-  点击坐标 (504, 397)（基座 (500, 400) + jitter (4, -3)）
+  点击坐标 (504, 397)（基座 (500, 400) + jitter (4, -3)），点击前随机延时 0.187s
   ```
+
+> 两者都是「零依赖 xorshift64\*」随机源（启动按时间播种），不引入额外依赖。
 
 ---
 

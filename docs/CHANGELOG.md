@@ -204,6 +204,16 @@
 - **过程记录（冲突修复）**：用户此前自行 merge 时在 `engine.rs` / `script.rs` / `README.md` / `docs/design.md` 残留**未解决的 git 冲突标记**（`<<<<<<< HEAD` … `>>>>>>>`），导致 `cargo test` 报 `engine.rs:785 unclosed delimiter`（行号实为错位）。逐文件解决冲突（保留带 step 级 verify_exact 的新版），并清理 `find_match` 之后残留的重复 `}`。
 - **涉及**：`adapter/capture.rs`（WindowShot/WindowMeta/capture_window/select_window + 4 单测）、`action.rs`（`Actions.window` 字段 + `set_window`/`in_window_mode` + `capture_target` + `offset_match`/`region_match_to_screen` + `snapshot`/`snapshot_region` + 3 单测）、`adapter/mod.rs`、`engine.rs`（run() 接 window + exec_screenshot/save_failure_snapshot 改窗口感知）、`script.rs`/README/design.md 冲突解决；测试 26→**33**。
 
+### M4 后续①：点击随机延时（2026-09-02）
+
+- **功能**：`[[step]] click_delay`（秒，随机延时上限）+ `click_delay_min`（可选下限）——`click` / `click_image` 在鼠标到位后、按下前随机等待 `[min, max]`；`click_delay = 0.3` → 随机 `[0, 0.3]s`，配 `click_delay_min = 0.1` → 随机 `[0.1, 0.3]s`。
+- **原因（新增，用户直接指令驱动）**：用户说「点击随机延时」——延续拟人化路线：`jitter` 已让**位置**随机，`click_delay` 让**时机**也随机。真实玩家连点从不精确等长；固定节奏点击是明显的「机器人特征」。
+- **为什么「鼠标到位后、按下前」延时**：更贴近真人（先移动到位、略作停顿再点击），而非点击后才等。
+- **为什么纳秒整数采样**：`(max - min) × 1e9` 转成整数做 `rng_next() % span_ns`，再换算回秒——避免浮点取模误差，区间采样均匀。
+- **为什么复用 xorshift64\***：与 `jitter` 同一零依赖随机源，不引入 `rand` 依赖树。
+- **边界**：`click_delay` 缺省 / `≤0`，或 `min ≥ max` → 不延时（向后兼容）；`min` 自动 clamp 到 `[0, max]`。
+- **涉及**：`script.rs`（Step 加 `click_delay`/`click_delay_min` + `Default` derive + 解析单测）、`engine.rs`（`exec_click`/`exec_click_image` 插延时 + `random_click_delay` 函数 + 报告显示延时 + 4 单测）、README/design.md 同步；测试 33→**37**。
+
 ---
 
 ## 四、关键技术机制复盘（深入原理）
@@ -287,6 +297,7 @@
 | fast→exact 后 | 25 | 3 | +确认一致性/兜底/解析默认值 |
 | step 级后（当前） | **26** | **3** | +步骤级覆盖解析 |
 | M4 窗口捕获后 | **33** | **3** | +窗口捕获 4 单测、坐标映射 3 单测 |
+| 点击随机延时后 | **37** | **3** | +click_delay 解析 1 单测、延时区间 4 单测 |
 
 ### 5.3 工程状态
 
