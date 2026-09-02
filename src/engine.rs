@@ -82,6 +82,8 @@ pub struct Engine {
     assets_dir: PathBuf,
     reports_dir: PathBuf,
     failsafe: Failsafe,
+    /// fast→exact 确认开关（来自场景 [meta] verify_exact）
+    verify_exact: bool,
 }
 
 impl Engine {
@@ -96,11 +98,16 @@ impl Engine {
             assets_dir,
             reports_dir: PathBuf::from("reports").join(safe_name),
             failsafe: Failsafe::new(),
+            verify_exact: false,
         }
     }
 
     /// 运行整个场景，返回是否全部通过（自动打印文本报告 + 写出 HTML 报告）
     pub fn run(&mut self, scenario: &Scenario) -> Result<bool> {
+        self.verify_exact = scenario.meta.verify_exact;
+        if self.verify_exact {
+            tracing::info!("verify_exact 已开启：所有模板匹配将做 fast→exact 精确确认");
+        }
         let instrs = compile(&scenario.steps)?;
         let mut frames: Vec<Frame> = Vec::new();
         let mut pc = 0usize;
@@ -229,8 +236,11 @@ impl Engine {
         let template = self.load_template(step)?;
         let precision = req_precision(step);
         match step.region {
-            Some(r) => self.actions.find_image_region(&template, precision, r),
-            None => self.actions.find_image(&template, precision),
+            Some(r) => {
+                self.actions
+                    .find_image_region(&template, precision, r, self.verify_exact)
+            }
+            None => self.actions.find_image(&template, precision, self.verify_exact),
         }
     }
 
