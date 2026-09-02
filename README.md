@@ -10,6 +10,7 @@
 ## ✨ 特性
 
 - **配置驱动**：测试场景 = TOML 文件，不写代码即可编排流程
+- **模板采集**：内置 `template` 子命令——用代码截图生成模板 PNG 到 `assets/`，并自动输出坐标与可直接粘贴的 TOML 片段，无需手工截图裁图
 - **控制流**：支持循环（`repeat`）与条件分支（`if_image` / `else`），可处理"遇弹窗关闭""重复刷本"等真实场景
 - **区域匹配**：可限定搜索区域，规避全屏模板匹配的性能瓶颈（M1 实测全屏朴素算法极慢，区域化后大幅提速）
 - **紧急停止（failsafe）**：运行中随时按 `F9` 中止，防止脚本失控
@@ -45,18 +46,50 @@ cargo run -- run scenarios/xxx.toml --assets assets/dn
 
 运行结束后，报告输出到控制台，并生成 `reports/<场景名>/index.html`（HTML 报告）与步骤截图。
 
+### 采集游戏模板（不用手工截图）
+把游戏开成**窗口模式**并置于前台，用框架自己截图生成模板，命令会打印坐标与可粘贴的 TOML 片段：
+
+```bash
+# 方式一：先全屏截图定位元素（打开生成的 full.png，用看图工具读取元素像素坐标）
+cargo run -- template --full --name full
+
+# 方式二：精确裁剪指定屏幕区域为模板
+cargo run -- template --name login_btn --x 640 --y 380 --w 120 --h 40
+
+# 方式三：把鼠标移到元素上，以鼠标为左上角/中心截取（真实桌面最方便）
+cargo run -- template --name attack_btn --at-mouse --w 80 --h 80
+cargo run -- template --name attack_btn --at-mouse --center --w 80 --h 80
+
+# 附加 --preview 可同时存一张全屏预览，便于查看元素坐标
+```
+
 ---
 
 ## 🖥️ CLI
 
 ```
 auto-game run <场景.toml> [--assets <资源目录>]
+auto-game template [选项]   # 模板采集：截图生成模板 + 输出坐标/TOML 片段
 ```
+
+| 命令 | 说明 |
+|---|---|
+| `run <场景.toml>` | 执行场景文件（必填） |
+| `run --assets <目录>` | 模板图像根目录，默认 `assets/` |
+| `template` | 模板采集子命令，见下方「模板采集」 |
+
+### `template` 采集参数
 
 | 参数 | 说明 |
 |---|---|
-| `run <场景.toml>` | 执行场景文件（必填） |
-| `--assets <目录>` | 模板图像根目录，默认 `assets/` |
+| `--name <模板名>` | 必填，输出文件名（不含扩展名，如 `login_btn` → `login_btn.png`） |
+| `--out <目录>` | 输出目录，默认 `assets/` |
+| `--x --y` | 区域左上角坐标（区域模式） |
+| `--w --h` | 区域宽高 |
+| `--at-mouse` | 以鼠标当前位置为左上角截取（需 `--w --h`） |
+| `--center` | 配合 `--at-mouse`：以鼠标位置为中心截取 |
+| `--full` | 全屏截图（用于定位元素坐标） |
+| `--preview` | 额外保存一张全屏预览到 `reports/`，便于确认坐标 |
 
 ---
 
@@ -186,6 +219,46 @@ action = "end_repeat"
 
 ---
 
+## 📸 模板采集（不手工截图）
+
+框架内置 `template` 子命令，**用代码截图生成模板**，同时给出它的屏幕坐标——「截图 → 模板 → 坐标 → 场景片段」全链路闭环，不需要任何外部截图工具。
+
+**完整流程（以龙之谷登录按钮为例）：**
+
+1. **定位**：游戏窗口模式放前台，先全屏截一张定位图
+   ```bash
+   cargo run -- template --full --name full
+   # 打开 assets/full.png，找到「登录」按钮的像素坐标（如 640, 380）
+   ```
+
+2. **裁剪模板**：按坐标精确截取按钮区域
+   ```bash
+   cargo run -- template --name dn_login_btn --x 640 --y 380 --w 120 --h 40
+   ```
+   命令输出（保存路径 + 可直接粘贴的场景片段）：
+   ```
+   ✅ 模板已保存: assets\dn_login_btn.png  (120x40)
+
+   在场景中直接使用（复制以下片段）：
+   [[step]]
+   action = "click_image"
+   image = "dn_login_btn.png"
+   precision = 0.85
+   region = { x = 640, y = 380, w = 120, h = 40 }
+   ```
+
+3. **粘贴到场景**：把输出的 `image` + `region` 片段并入你的 TOML 场景即可。`region` 既描述了模板所在位置，又用来**限定搜索范围**（匹配更快更准）。
+
+**鼠标快捷流**：不想看图查坐标时，把鼠标移到元素上直接截：
+```bash
+cargo run -- template --name attack_btn --at-mouse --center --w 80 --h 80
+```
+（以鼠标为中心截 80×80；`--at-mouse` 不带 `--center` 则以鼠标为左上角。）
+
+> 提示：截图坐标以**屏幕左上角 (0,0)** 为原点。游戏请用**固定窗口模式**，避免窗口尺寸/缩放变化导致坐标漂移。
+
+---
+
 ## 🖼️ 区域匹配（性能要点）
 
 **背景**：默认的模板匹配是"全屏截取 → 朴素算法扫描"，在 debug 模式下 500×400 区域就实测约 78 秒，全屏更久。
@@ -240,7 +313,6 @@ cargo test          # 运行单元测试（脚本解析 / 控制流编译 / 报�
 `scenarios/` 下还提供了可执行演示场景：
 - `demo.toml` — M2 冒烟（全链路）
 - `m3_demo.toml` — M3 控制流（循环 + 分支）
-- `features.toml` — 新特性（组合键 / 区域匹配 / 控制流组合）
 
 ---
 
@@ -252,7 +324,7 @@ auto-game/
 ├── README.md                 # 本文件
 ├── docs/design.md            # 设计文档（架构/选型/游戏适配）
 ├── src/
-│   ├── main.rs               # CLI 入口：auto-game run <场景>
+│   ├── main.rs               # CLI 入口：run <场景> / template 模板采集
 │   ├── lib.rs                # 库入口（供二次开发）
 │   ├── adapter/              # 可插拔后端：capture / input / vision + Region
 │   ├── action.rs             # 动作原语（截图/移动/点击/按键/找图）
@@ -269,6 +341,12 @@ auto-game/
 
 **Q：模板匹配很慢怎么办？**
 指定 `region` 缩小搜索范围，并用 `--release` 构建运行。
+
+**Q：怎么采集模板图像？还要自己截图裁剪吗？**
+不用。用内置 `template` 子命令：`auto-game template --name <模板> --x --y --w --h`（或 `--at-mouse` 以鼠标定位）。它用代码截图生成模板 PNG 到 `assets/`，并打印坐标与可直接粘贴的 TOML 片段。详见「模板采集」一节。
+
+**Q：模板需要很精确吗？**
+模板即目标区域的原样截图即可（按钮/图标/静态 UI）。运行匹配用 `precision`（默认 0.85）容忍轻微差异；背景会动的区域请把模板裁小一点（只含静态部分），并配合 `region` 限定。
 
 **Q：点击/按键没生效？**
 输入模拟可能被系统/杀软拦截（UIPI）。请以管理员/前台窗口运行，或在杀软中添加白名单。
