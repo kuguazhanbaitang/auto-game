@@ -294,6 +294,40 @@
 - `cargo test -j 1` = **39 passed + 3 ignored**（既有功能回归无影响）；
 - 实际启动 `auto-game gui`，进程正常存活 7s 未崩溃（无 panic 输出）。
 
+### M4 后续④：validate 场景静态校验（2026-09-02，本地未推送）
+
+#### 需求与定位
+
+用户从三个候选功能中依次推进，本项为 **`validate` 子命令**：不实际运行场景，预先检查常见错误，把「写错 TOML → 跑起来才发现」变成「跑之前就报出来」。它是三者中**成本最低、收益最直接**的一项（不引入新依赖、不新增运行时能力，纯静态分析 + 复用引擎既有检查）。
+
+#### 检查项设计（每项对应引擎真实运行语义，非表面语法）
+
+| 检查 | 级别 | 依据 |
+|---|---|---|
+| TOML 解析失败 / 缺字段 | ERROR | `Scenario::load` 的 serde 错误 |
+| 未知动作类型 | ERROR | 引擎 `execute` 的 match 白名单（18 种：14 普通 + 4 控制流关键字之外的 `end_repeat/else/end_if` 属控制流） |
+| 必填参数缺失 | ERROR | 各动作真实依赖（click/move_mouse→x,y；key_press→key；key_combo→keys；type_text/if_text/click_text/assert_text→text；图像类→image；repeat→count） |
+| 模板文件不存在 | ERROR | `resolve_asset` 语义：相对 assets 目录拼接 |
+| 非法按键 / 组合键 | ERROR | `key_from_str` 白名单 |
+| precision 超出 [0,1] | ERROR | 匹配阈值语义 |
+| region 宽高为 0 | ERROR | 裁剪/匹配必然失败 |
+| OCR 模型文件缺失 | ERROR | `OcrBackend::load` 依赖 det/rec/字典三文件 |
+| 控制流未闭合 / 悬空 else | ERROR | **复用 `engine::compile`**（单一事实来源，不带病执行） |
+| 空场景 / 未命名 | WARN | 报告可读性 |
+| timeout ≤ 0 / count=0 / jitter 过大 / 延时区间非法（min≥max） | WARN | 引擎有回退默认值或静默失效，不致命但应提示 |
+| region 用在无意义动作上 | WARN | 冗余字段 |
+
+#### 关键实现决策
+
+- **控制流检查复用 `engine::compile`**：新增 `engine::check_control_flow(steps) -> Result<()>`（内部 `compile(steps).map(|_| ())`），validate 直接调用——不复制第二套配对逻辑，避免两处不一致（例如将来新增控制结构时只改一处）。
+- **退出码语义**：发现 ERROR 时 `exit(1)`（CI 友好），仅 WARN 时 exit 0 但提示；空场景只是 WARN（引擎本身允许空场景）。
+- **不影响运行时**：validate 是纯 lib 层静态函数（`auto_game::validate::validate_scenario`），不实例化 Engine、不碰屏幕/输入/模型加载。
+
+#### 验证
+
+- `cargo test -j 1` = **50 passed + 3 ignored**（新增 11 个 validate 测试：合法场景通过、未知动作/缺参数/模板缺失/控制流未闭合/悬空 else/非法按键/OCR 缺模型/precision 越界/坏 TOML 报错、空场景仅警告）。
+- 实测 `validate scenarios/demo.toml` → ✅ 通过；构造坏场景 → 精确报出 7 个错误（控制流、缺 x/y、未知动作、非法按键、模板缺失、precision 越界）且退出码 1。
+
 ---
 
 ## 四、关键技术机制复盘（深入原理）
@@ -448,7 +482,7 @@
 2. ~~点击随机延时~~ ✅ 已做
 3. ~~OCR 接入~~ ✅ 已做（paddleocr_rs_onnx + PP-OCRv4）
 4. ~~GUI 录制器（egui）~~ ✅ 已做（M4 后续③）——可视化编排场景、录制点击序列、画面预览、步骤编辑、导出并复用引擎运行。
-5. **场景静态校验（validate 子命令）**——不实际跑场景就能检查 TOML 语法 / 模板存在 / 控制流闭合 / OCR 模型存在。
+5. ~~场景静态校验（validate 子命令）~~ ✅ 已做（M4 后续④）——不实际跑场景就能检查 TOML 语法 / 模板存在 / 控制流闭合 / OCR 模型存在。
 6. **GitHub Actions CI + 打包**——持续集成与发布产物。
 
 ---

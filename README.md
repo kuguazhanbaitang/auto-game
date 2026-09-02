@@ -21,6 +21,7 @@
 - **OCR 文字识别**：`ocr_text` / `if_text` / `click_text` / `assert_text`——识别游戏界面文字（血量/数值/标题/弹窗文案），与模板匹配互补（模板回答"某图在不在/在哪"，OCR 回答"这里写了什么"）
 - **组合键**：`key_combo` 支持 Ctrl+A 等组合键；按键覆盖游戏常用键位（WASD/数字/F1-F12/方向/修饰键）
 - **GUI 录制器**：`gui` 子命令打开桌面界面——实时画面预览、录制手动点击/按键自动生成步骤、框选即存模板、步骤可视化编辑、一键导出 TOML 并复用引擎运行（录制自动生成 `click`/`key_press`，坐标点击可一键转 `click_image` 模板）
+- **场景静态校验**：`validate` 子命令运行前体检——检查 TOML 语法/动作合法性/必填参数/模板存在/控制流闭合/OCR 模型存在，发现错误退出码 1，适合接入 CI 或预提交钩子
 - **报告**：文本报告 + HTML 报告（状态着色、耗时统计、注入转义）
 - **可插拔后端**：截图 / 输入 / 识别 / OCR 全部封装在 trait 之后，可替换底层库（xcap / enigo / rustautogui / paddleocr_rs_onnx）
 
@@ -77,6 +78,7 @@ cargo run -- template --name attack_btn --at-mouse --center --w 80 --h 80
 auto-game run <场景.toml> [--assets <资源目录>]
 auto-game template [选项]   # 模板采集：截图生成模板 + 输出坐标/TOML 片段
 auto-game gui [--assets <资源目录>]   # GUI 录制器：可视化录制/预览/编辑/运行
+auto-game validate <场景.toml> [--assets <资源目录>]   # 场景静态校验
 ```
 
 | 命令 | 说明 |
@@ -85,6 +87,7 @@ auto-game gui [--assets <资源目录>]   # GUI 录制器：可视化录制/预�
 | `run --assets <目录>` | 模板图像根目录，默认 `assets/` |
 | `template` | 模板采集子命令，见下方「模板采集」 |
 | `gui` | 打开 GUI 录制器（可视化录制点击/按键、框选模板、编辑步骤、导出并运行），见「GUI 录制器」 |
+| `validate` | 运行前静态校验场景（语法/动作/参数/模板/控制流/OCR），见「场景静态校验」 |
 
 ### `template` 采集参数
 
@@ -126,6 +129,39 @@ auto-game gui --assets D:\my-assets
 - 录制期间请把焦点放在**游戏窗口**上操作；在 GUI 窗口里按字母/数字键会被当作录制输入（白名单外的 F13+、小键盘、标点不录）。
 - 预览/录制与引擎运行约束相同：需要真实桌面会话与前台窗口。
 - 若场景用到 OCR 动作，运行前需 `$env:ORT_DYLIB_PATH = (Resolve-Path "libs\onnxruntime.dll").Path`（与 CLI 一致）。
+
+---
+
+## 🔍 场景静态校验（validate）
+
+运行前体检：不实际跑场景，检查 TOML 语法、动作合法性、必填参数、模板文件存在、控制流闭合、OCR 模型存在，把常见错误挡在运行期之前。
+
+```
+auto-game validate scenarios/demo.toml          # 用默认 assets/
+auto-game validate 场景.toml --assets my-assets # 指定模板目录
+```
+
+**退出码**：存在 ERROR 时返回 `1`（方便 CI / 钩子），仅 WARN 或全通过时返回 `0`。
+
+**检查项**：
+
+| 级别 | 检查 |
+|---|---|
+| ERROR | TOML 解析失败 / 未知动作 / 必填参数缺失（click 缺 x,y、key_press 缺 key、图像动作缺 image、OCR 动作缺 text…）/ 模板文件不存在 / 非法按键 / precision 超 [0,1] / region 宽高为 0 / OCR 模型缺失 / 控制流未闭合或悬空 else |
+| WARN | 空场景 / 未设置场景名 / timeout≤0 / repeat count=0 / jitter 过大 / 点击延时区间非法 / region 用在无意义动作上 |
+
+示例输出：
+
+```
+校验场景: scenarios/demo.toml
+✅ 通过：未发现问题
+
+校验场景: bad.toml
+[ERROR] 场景: 控制流错误: 存在未闭合的控制结构（缺少 end_repeat / end_if）
+[ERROR] 步骤 #1: 步骤 #1 (click) 缺少必填参数 x
+[ERROR] 步骤 #3: 未知动作类型 "no_such_action"
+❌ 校验未通过：3 个错误、0 个警告（退出码 1）
+```
 
 ---
 
@@ -556,9 +592,10 @@ auto-game/
 ├── README.md                 # 本文件
 ├── docs/design.md            # 设计文档（架构/选型/游戏适配）
 ├── src/
-│   ├── main.rs               # CLI 入口：run <场景> / template 模板采集 / gui 录制器
+│   ├── main.rs               # CLI 入口：run <场景> / template 模板采集 / gui 录制器 / validate 校验
 │   ├── lib.rs                # 库入口（供二次开发）
 │   ├── gui.rs                # GUI 录制器（egui/eframe 桌面界面）
+│   ├── validate.rs           # 场景静态校验（不运行场景的体检）
 │   ├── adapter/              # 可插拔后端：capture / input / vision / ocr + Region
 │   ├── action.rs             # 动作原语（截图/移动/点击/按键/找图）
 │   ├── engine.rs             # 流程引擎（编译指令 + 循环/分支 + failsafe + OCR 动作）

@@ -370,3 +370,39 @@ action = "end_repeat"
 - OCR 预览/运行若启用，需 `ORT_DYLIB_PATH` 指向 `libs/onnxruntime.dll`（与 CLI 相同）；
 - eframe 0.35 相对 0.34 为不兼容大版本（App trait 改 `ui`、面板统一 `Panel`），升级需按 §CHANGELOG 4.9 迁移。
 
+## 12. 场景静态校验（validate 子命令）
+
+> 里程碑：M4 后续④。不实际运行场景，预先静态检查常见错误，把「写错 → 跑起来才发现」变成「跑之前就报出来」——相当于**上线前体检**，也是后续 CI 的基础。
+
+### 12.1 用法
+
+```
+auto-game validate <场景.toml> [--assets <资源目录>]
+```
+
+- 无 ERROR → 打印通过 / 有 WARN 打印警告，退出码 0；
+- 存在 ERROR → 逐条打印 `[ERROR] 步骤 #N: …` / `[ERROR] 场景: …`，退出码 **1**（CI 友好）。
+
+### 12.2 检查清单
+
+| 检查 | 级别 | 语义 |
+|---|---|---|
+| TOML 解析 / 字段 | ERROR | serde 反序列化失败 |
+| 未知动作 | ERROR | 引擎动作白名单之外 |
+| 必填参数缺失 | ERROR | 各动作的真实依赖 |
+| 模板文件存在 | ERROR | 相对 assets 目录拼接（与引擎 `resolve_asset` 一致） |
+| 按键/组合键合法 | ERROR | `key_from_str` 白名单 |
+| precision ∈ [0,1] | ERROR | 匹配阈值 |
+| region 宽高 > 0 | ERROR | 裁剪必然失败 |
+| OCR 模型三文件存在 | ERROR | 用到 OCR 动作时检查 `assets/ocr/` |
+| 控制流闭合/悬空 else | ERROR | **复用引擎 `compile`**（单一事实来源） |
+| 空场景 / 未命名 | WARN | 报告可读性 |
+| timeout/count/jitter/延时区间 | WARN | 引擎有回退或静默失效，不致命 |
+
+### 12.3 设计要点
+
+- **复用而非重写**：控制流配对检查直接调 `engine::check_control_flow`（内部走 `compile`），与运行期判定完全一致，将来新增控制结构只改一处；
+- **纯静态、零副作用**：不实例化 Engine、不碰屏幕/输入/模型加载，可在 CI / 预提交钩子中安全使用；
+- **按引擎真实语义检查**：每一项 ERROR 都对应运行期必然失败（而非表面语法），WARN 对应「有回退默认值但建议修正」。
+
+
