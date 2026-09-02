@@ -70,13 +70,10 @@ pub struct Step {
     /// 限定搜索区域（仅图像类动作使用，性能优化）
     #[serde(default)]
     pub region: Option<Region>,
-<<<<<<< HEAD
     /// fast→exact 确认开关（按步骤粒度，覆盖 [meta] 全局 verify_exact）：
     /// 显式声明 true/false 时覆盖全局；缺省时回退 [meta] 全局值。
     #[serde(default)]
     pub verify_exact: Option<bool>,
-=======
->>>>>>> a352e497aaa5e88d41c3d0baae4d2d9cd60a1dec
 }
 
 impl Scenario {
@@ -126,10 +123,7 @@ jitter = 5
 action = "if_image"
 image = "b.png"
 region = { x = 0, y = 0, w = 500, h = 400 }
-<<<<<<< HEAD
 verify_exact = false
-=======
->>>>>>> a352e497aaa5e88d41c3d0baae4d2d9cd60a1dec
 "#;
         let s: Scenario = toml::from_str(toml).expect("场景应能解析");
         assert_eq!(s.meta.name.as_deref(), Some("解析测试"));
@@ -155,7 +149,6 @@ verify_exact = false
 
         let r = s.steps[4].region.expect("region 应被解析");
         assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 500, 400));
-<<<<<<< HEAD
         // 步骤级 verify_exact 显式覆盖全局
         assert_eq!(s.steps[4].verify_exact, Some(false));
     }
@@ -179,8 +172,6 @@ action = "wait_image"
         assert!(s.meta.verify_exact);
         assert_eq!(s.steps[0].verify_exact, Some(false), "步骤级显式 false 应覆盖全局");
         assert_eq!(s.steps[1].verify_exact, None, "步骤未声明时应为 None（回退全局）");
-=======
->>>>>>> a352e497aaa5e88d41c3d0baae4d2d9cd60a1dec
     }
 
     #[test]

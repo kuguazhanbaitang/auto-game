@@ -108,6 +108,10 @@ impl Engine {
         if self.verify_exact {
             tracing::info!("verify_exact 已开启：所有模板匹配将做 fast→exact 精确确认");
         }
+        self.actions.set_window(scenario.meta.window.clone());
+        if let Some(w) = &scenario.meta.window {
+            tracing::info!("窗口捕获模式已启用：限定标题 {w:?}，识别/输入坐标自动映射到屏幕");
+        }
         let instrs = compile(&scenario.steps)?;
         let mut frames: Vec<Frame> = Vec::new();
         let mut pc = 0usize;
@@ -231,7 +235,6 @@ impl Engine {
         Ok(self.find_match(step)?.is_some())
     }
 
-<<<<<<< HEAD
     /// 在屏幕或指定区域内查找模板。
     /// 开关粒度：步骤显式声明 `verify_exact` 时覆盖 [meta] 全局值，否则回退全局。
     fn find_match(&self, step: &Step) -> Result<Option<Match>> {
@@ -244,18 +247,6 @@ impl Engine {
                     .find_image_region(&template, precision, r, verify)
             }
             None => self.actions.find_image(&template, precision, verify),
-=======
-    /// 在屏幕或指定区域内查找模板
-    fn find_match(&self, step: &Step) -> Result<Option<Match>> {
-        let template = self.load_template(step)?;
-        let precision = req_precision(step);
-        match step.region {
-            Some(r) => {
-                self.actions
-                    .find_image_region(&template, precision, r, self.verify_exact)
-            }
-            None => self.actions.find_image(&template, precision, self.verify_exact),
->>>>>>> a352e497aaa5e88d41c3d0baae4d2d9cd60a1dec
         }
     }
 
@@ -294,7 +285,7 @@ impl Engine {
     // ---- 采集/输入类动作 ----
 
     fn exec_screenshot(&self, index: usize) -> Result<String> {
-        let img = self.actions.capture_full()?;
+        let img = self.actions.snapshot()?;
         std::fs::create_dir_all(&self.reports_dir)?;
         let path = self.reports_dir.join(format!("step_{index}.png"));
         img.save(&path)?;
@@ -434,8 +425,8 @@ impl Engine {
     fn save_failure_snapshot(&self, step: &Step, index: usize) -> String {
         let mut notes = Vec::new();
         let shot = match step.region {
-            Some(r) => self.actions.capture_region(r.x, r.y, r.w, r.h),
-            None => self.actions.capture_full(),
+            Some(r) => self.actions.snapshot_region(r),
+            None => self.actions.snapshot(),
         };
         let shot_img = match shot {
             Ok(img) => img,

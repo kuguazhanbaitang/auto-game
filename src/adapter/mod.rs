@@ -9,7 +9,7 @@ pub mod capture;
 pub mod input;
 pub mod vision;
 
-pub use capture::{CaptureBackend, CaptureTrait};
+pub use capture::{CaptureBackend, CaptureTrait, WindowShot};
 pub use input::{InputBackend, InputTrait, Key, key_from_str};
 pub use vision::{Match, VisionBackend, VisionTrait};
 
