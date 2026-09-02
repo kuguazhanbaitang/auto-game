@@ -1,0 +1,85 @@
+# auto-game CI：云端自动构建 + 测试 + Release exe 打包
+#
+# 触发：push / PR 到 main
+# 平台：windows-latest（与目标环境一致；依赖 xcap/enigo/device_query/eframe 均为 Windows 定位）
+#
+# 注意：
+# - 仓库根 .cargo/config.toml 指向本地 D:/auto-game-target（Windows 磁盘），
+#   CI runner 无此路径语义 → 用 CARGO_TARGET_DIR=target 覆盖，避免构建失败。
+# - OCR 依赖 vendor/paddleocr_rs_onnx（ort 2.0.0-rc.12），CI 云端可正常访问
+#   crates.io 与 GitHub releases 下载预编译 onnxruntime，无需特殊处理。
+# - libs/onnxruntime.dll 与 assets/ocr/ 模型均已入库，仓库自包含。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # 关键：覆盖 .cargo/config.toml 的本地 D 盘 target-dir
+  CARGO_TARGET_DIR: target
+
+jobs:
+  # 1) 构建 + 全量测试（忽略的 3 个测试依赖真实屏幕/耗时基准，CI 自动跳过）
+  test:
+    name: Build + Test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (all targets)
+        run: cargo build --all-targets
+
+      - name: Test
+        run: cargo test
+
+      # 不碰屏幕/输入的静态校验冒烟：直接跑 validate 验证场景体检功能
+      - name: Validate smoke
+        run: cargo run -- validate scenarios/demo.toml
+
+  # 2) Release exe 打包（仅 push 到 main 时），输出自包含压缩包
+  package:
+    name: Package release exe
+    runs-on: windows-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      # 组装自包含 bundle：exe + OCR 运行时 dll + 模型/场景/README
+      - name: Assemble release bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-bundle | Out-Null
+          Copy-Item target\release\auto-game.exe release-bundle\
+          Copy-Item libs\onnxruntime.dll release-bundle\
+          Copy-Item libs\onnxruntime_providers_shared.dll release-bundle\
+          Copy-Item assets -Recurse release-bundle\
+          Copy-Item scenarios -Recurse release-bundle\
+          Copy-Item README.md release-bundle\
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-game-windows
+          path: release-bundle
+          if-no-files-found: error
